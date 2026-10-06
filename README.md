@@ -229,6 +229,9 @@ The players then play to the DAC as usual.
   now*. If there is no button, add `-v /lib/modules:/lib/modules:ro` and
   `--privileged` to the run command, or run `sudo modprobe snd-aloop` on the
   server.
+* **"Module snd-aloop not found"**: on Ubuntu the driver is in a separate
+  package. Install it on the server with
+  `sudo apt install linux-modules-extra-$(uname -r)`.
 * **Roon doesn't list Loopback**: restart Roon Server after the Loopback card
   appears.
 * **The recording never starts**: the player isn't playing to the Loopback

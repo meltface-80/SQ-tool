@@ -231,5 +231,45 @@ class ProcParsing(unittest.TestCase):
                     os.environ["SQTOOL_PROC_ASOUND"] = old
 
 
+class LoadLoopback(unittest.TestCase):
+    """Loading snd-aloop from the container: what the page says when it can't."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        fake = FakeLoopback(os.path.join(d, "asound"))
+        cards = os.path.join(fake.root, "cards")
+        with open(cards) as f:
+            text = f.read()
+        with open(cards, "w") as f:  # no Loopback card yet
+            f.write("".join(line + "\n" for line in text.splitlines() if "Loopback" not in line))
+        bindir = os.path.join(d, "bin")
+        os.makedirs(bindir)
+        modprobe = os.path.join(bindir, "modprobe")
+        with open(modprobe, "w") as f:
+            f.write('#!/bin/sh\necho "modprobe: FATAL: Module snd-aloop not found in directory /lib/modules/x"\nexit 1\n')
+        os.chmod(modprobe, 0o755)
+        self.modules = os.path.join(d, "modules")
+        os.makedirs(os.path.join(self.modules, os.uname().release))
+        self.env = {"SQTOOL_PROC_ASOUND": fake.root, "SQTOOL_MODULES": self.modules,
+                    "PATH": bindir + os.pathsep + os.environ.get("PATH", "")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_messages(self):
+        from unittest import mock
+        from sqtool.alsa import load_loopback
+        with mock.patch.dict(os.environ, self.env):
+            ok, msg = load_loopback()
+            self.assertFalse(ok)
+            self.assertIn("Module snd-aloop not found", msg)
+            self.assertIn("sudo apt install linux-modules-extra-" + os.uname().release, msg)
+            os.environ["SQTOOL_MODULES"] = os.path.join(self.tmp.name, "nothing")
+            ok, msg = load_loopback()
+            self.assertFalse(ok)
+            self.assertIn("-v /lib/modules:/lib/modules:ro", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

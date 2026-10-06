@@ -322,7 +322,12 @@ def load_loopback(timeout: float = 20.0) -> Tuple[bool, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, "modprobe failed: %s" % exc
     if r.returncode != 0:
-        return False, "modprobe snd-aloop failed: %s" % (r.stdout.decode(errors="replace").strip() or r.returncode)
+        text = r.stdout.decode(errors="replace").strip() or "exit status %d" % r.returncode
+        if "not found" in text:
+            # Ubuntu ships snd-aloop in a separate package.
+            text += (". On Ubuntu, install it on the server with: sudo apt install "
+                     "linux-modules-extra-%s" % os.uname().release)
+        return False, "modprobe snd-aloop failed: %s" % text
     for _ in range(50):
         if find_loopback(list_cards()):
             return True, "loaded the snd-aloop driver"
