@@ -35,7 +35,7 @@ from .analysis import _chunks, analyze_file, compare, silence_bounds, to_float
 from .plots import exact_timeline, item_plots, null_plots
 from .report import comparison_lines, headline, short_verdict
 from .spectrogram import difference, fetch_from, render
-from .usbmon import UsbCapture
+from .usbmon import UsbCapture, usbmon_state
 from .wavio import (SIDECAR_SUFFIX, Audio, AudioFileError, float_wav_header, load_audio, read_tags,
                     read_wav, write_wav)
 
@@ -754,7 +754,7 @@ NO_LOOPBACK = ("no Loopback sound card found. On the server, run: sudo modprobe 
 def resolve_device(setting: str = "auto") -> str:
     """The device a recording uses for the "Record from" setting: auto, loopback or usb[:card].
 
-    Automatic means the Loopback card, or failing that the first USB DAC (recorded over usbmon).
+    Automatic means the Loopback card or, failing that, a USB DAC if usbmon is there to record it.
     """
     kind, _, ref = (setting or "auto").partition(":")
     if kind in ("auto", "loopback"):
@@ -765,6 +765,8 @@ def resolve_device(setting: str = "auto") -> str:
             raise CaptureError(NO_LOOPBACK)
     if kind in ("auto", "usb"):
         dacs = usb_dacs()
+        if kind == "auto":
+            dacs = [d for d in dacs if usbmon_state(d.bus) == "ready"]
         if dacs:
             pick = [d for d in dacs if str(d.card.index) == ref] or dacs
             return "usb:%d" % pick[0].card.index

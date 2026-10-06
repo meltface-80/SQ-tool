@@ -161,7 +161,7 @@
     var cap = S.state.capture || {}, html = "", quiet = S.page === "test";
     if ((cap.problems || []).length) {
       html = '<div class="alert warn">' + cap.problems.map(function (p) { return "<p>" + esc(p) + "</p>"; }).join("");
-      if (!cap.use || cap.use.indexOf("loopback") === 0) {
+      if (!cap.loopback && cap.kind !== "usb") {
         html += cap.can_load_loopback
           ? '<p><button class="btn small" data-act="load-loopback">Load the Loopback driver now</button></p>'
           : "<p>On the server, run:</p><pre class=\"cmd\">sudo modprobe snd-aloop</pre>";

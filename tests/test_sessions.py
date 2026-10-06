@@ -13,6 +13,7 @@ import numpy as np
 
 from helpers import FAKE_ARECORD, FakeLoopback, alsa_bytes, music
 
+from sqtool.alsa import CaptureError
 from sqtool.sessions import Recorder, Tests, _steps, longest_silence, resolve_device
 from sqtool.spectrogram import LUT
 from sqtool.wavio import Audio, info_chunk, read_wav, write_wav
@@ -273,6 +274,21 @@ class Devices(SessionBase):
         self.assertEqual(resolve_device("loopback:7"), "loopback:1")  # the card number moved
         self.assertEqual(resolve_device("usb"), "usb:2")
         self.assertEqual(resolve_device("usb:2"), "usb:2")
+
+    def test_no_loopback_card(self):
+        # Automatic falls back to a USB DAC only when usbmon can record it (it can't here).
+        cards = os.path.join(self.fake.root, "cards")
+        with open(cards) as f:
+            original = f.read()
+        try:
+            with open(cards, "w") as f:
+                f.write("".join(line + "\n" for line in original.splitlines() if "Loopback" not in line))
+            with self.assertRaises(CaptureError):
+                resolve_device("auto")
+            self.assertEqual(resolve_device("usb"), "usb:2")  # chosen explicitly: tried anyway
+        finally:
+            with open(cards, "w") as f:
+                f.write(original)
 
 
 class Alignment(SessionBase):

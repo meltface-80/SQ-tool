@@ -21,7 +21,7 @@ from . import __version__
 from .alsa import (ACTIVE_STATES, CaptureError, find_loopback, kernel_modules_dir, list_cards, load_loopback,
                    playback_streams, proc_asound, process_info, usb_dacs)
 from .sessions import Recorder, Tests, clean, resolve_device
-from .usbmon import usbmon_path
+from .usbmon import usbmon_state
 from .wavio import AudioFileError
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -49,13 +49,6 @@ def _playing(card_index: int) -> Optional[dict]:
     return None
 
 
-def _usbmon_state(bus: int) -> str:
-    path = usbmon_path(bus)
-    if os.path.exists(path):
-        return "ready" if os.access(path, os.R_OK) else "no-permission"
-    return "ready" if os.path.exists("/sys/class/usbmon/usbmon%d" % bus) else "missing"
-
-
 def devices(setting: str, arecord: str) -> dict:
     problems: List[str] = []
     cards = list_cards()
@@ -70,23 +63,25 @@ def devices(setting: str, arecord: str) -> dict:
     if loop:
         loopback = {"card": loop.index, "id": loop.id, "play_to": "hw:%d,0" % loop.index,
                     "playing": _playing(loop.index)}
-    dacs = [{"id": "usb:%d" % d.card.index, "name": d.card.name, "usbmon": _usbmon_state(d.bus),
+    dacs = [{"id": "usb:%d" % d.card.index, "name": d.card.name, "usbmon": usbmon_state(d.bus),
              "playing": _playing(d.card.index)} for d in usb_dacs()]
     kind = setting.partition(":")[0]
     try:
         use = resolve_device(setting)
     except CaptureError:
         use = None
-    if kind in ("auto", "loopback") and not loopback and cards:
+    if use is None and kind in ("auto", "loopback") and cards:
         problems.append("The Loopback sound card is not loaded, so nothing can be recorded yet.")
     if use and use.startswith("usb"):
         dac = [d for d in dacs if d["id"] == use][0]
         if dac["usbmon"] != "ready":
             problems.append("Recording the USB DAC needs the usbmon driver: on the server run "
-                            "sudo modprobe usbmon")
+                            "sudo modprobe usbmon" if dac["usbmon"] == "missing" else
+                            "No permission to read the USB monitor: start the container with --privileged.")
+            use = None
     if use and use.startswith("loopback") and not shutil.which(arecord):
         problems.append("arecord is missing: install alsa-utils.")
-    return {"use": use, "loopback": loopback, "dacs": dacs, "problems": problems,
+    return {"use": use, "kind": kind, "loopback": loopback, "dacs": dacs, "problems": problems,
             "can_load_loopback": bool(not loopback and shutil.which("modprobe")
                                       and os.path.isdir(kernel_modules_dir()))}
 

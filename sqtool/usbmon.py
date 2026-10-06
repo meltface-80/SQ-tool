@@ -127,6 +127,14 @@ def usbmon_path(bus: int) -> str:
     return os.path.join(os.environ.get("SQTOOL_DEV", "/dev"), "usbmon%d" % bus)
 
 
+def usbmon_state(bus: int) -> str:
+    """"ready", "no-permission" or "missing" (the usbmon driver isn't loaded)."""
+    path = usbmon_path(bus)
+    if os.path.exists(path):
+        return "ready" if os.access(path, os.R_OK) else "no-permission"
+    return "ready" if os.path.exists("/sys/class/usbmon/usbmon%d" % bus) else "missing"
+
+
 def ensure_usbmon_node(bus: int) -> str:
     """Path of /dev/usbmonN, creating the node from sysfs if a container lacks it."""
     path = usbmon_path(bus)
