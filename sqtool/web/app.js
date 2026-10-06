@@ -212,8 +212,9 @@
   function renderLibrary() {
     var v = $("#view-library");
     var items = S.items;
+    var free = S.state && S.state.free_bytes != null ? " · " + fmtBytes(S.state.free_bytes) + " free" : "";
     var html = '<div class="card row spread"><div><h2>Library</h2><span class="muted">' + items.length +
-      " item" + (items.length === 1 ? "" : "s") + ". Same colour swatch = identical sample data.</span></div>" +
+      " item" + (items.length === 1 ? "" : "s") + free + ". Same colour swatch = identical sample data.</span></div>" +
       '<div class="row"><label class="btn small">Import source file<input id="import" type="file" accept=".wav,.flac,.aif,.aiff,.m4a,audio/*" hidden></label>' +
       '<button class="btn small" id="tracks-btn">Test tracks</button></div></div>';
     if (!items.length) {
@@ -705,6 +706,7 @@
     return api("/api/state").then(function (st) {
       S.state = st;
       renderCaptureLive();
+      $("#version").textContent = "SQ-tool " + st.version;
       var cap = st.capture;
       var savedKey = cap ? JSON.stringify((cap.saved || []).map(function (i) { return i.id; })) + cap.state : "";
       if (savedKey !== S.savedSeen) {

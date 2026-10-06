@@ -220,6 +220,7 @@ details > summary { cursor: pointer; color: var(--accent); font-weight: 600; mar
   box-shadow: 0 6px 24px rgba(0,0,0,.25); font-size: .92rem;
 }
 .empty { text-align: center; color: var(--muted); padding: 24px 8px; }
+.footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 8px 16px 24px; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 420px) { .grid2 { grid-template-columns: 1fr; } .status-big { font-size: 2rem; } }
