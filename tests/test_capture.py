@@ -85,6 +85,22 @@ class CaptureRun(unittest.TestCase):
         self.assertEqual(res["verdict"], "IDENTICAL")
         self.assertEqual(res["exact"]["missing_start"], 1000)
 
+    def test_arecord_runs_untranslated_with_short_periods(self):
+        proc = self.start([], self.pcm(self.src, "S32_LE"), 8)
+        time.sleep(0.3)
+        self.fake.play()
+        self.finish(proc)
+        self.assertEqual(self.arecord_calls()[0][-4:], ["-B", "500000", "-F", "25000"])
+        with open(self.args_log + ".env") as f:
+            self.assertEqual(f.read().split(), ["LC_ALL=C"])
+
+    def test_prearm_with_only_silence_is_an_error(self):
+        silent = self.pcm(np.zeros((RATE, 2), np.int32), "S32_LE", "silence.pcm")
+        proc = self.start(["--prearm", "S32_LE:44100:2", "--wait", "1"], silent, 8, close_dir=False)
+        text = self.finish(proc, expect_code=2)
+        self.assertIn("only silence was captured", text)
+        self.assertFalse(os.path.exists(self.out))
+
     def test_formats_and_the_other_loopback_device(self):
         for fmt, width in (("S24_3LE", 3), ("S24_LE", 4), ("S16_LE", 2), ("FLOAT_LE", 4)):
             with self.subTest(fmt=fmt):
@@ -200,8 +216,8 @@ class ProcParsing(unittest.TestCase):
                 cards = list_cards()
                 self.assertEqual([(c.index, c.id, c.driver) for c in cards],
                                  [(0, "PCH", "HDA-Intel"), (1, "Loopback", "Loopback"),
-                                  (2, "D90", "USB-Audio")])
-                self.assertEqual(cards[2].name, "Topping D90")
+                                  (2, "SU1", "USB-Audio")])
+                self.assertEqual(cards[2].name, "SMSL SU-1")
                 fake.play("S32_LE", 44100, 2, card=2)
                 report = status_report()
                 self.assertIn("<- loopback", report)
@@ -213,6 +229,46 @@ class ProcParsing(unittest.TestCase):
                     del os.environ["SQTOOL_PROC_ASOUND"]
                 else:
                     os.environ["SQTOOL_PROC_ASOUND"] = old
+
+
+class LoadLoopback(unittest.TestCase):
+    """Loading snd-aloop from the container: what the page says when it can't."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        fake = FakeLoopback(os.path.join(d, "asound"))
+        cards = os.path.join(fake.root, "cards")
+        with open(cards) as f:
+            text = f.read()
+        with open(cards, "w") as f:  # no Loopback card yet
+            f.write("".join(line + "\n" for line in text.splitlines() if "Loopback" not in line))
+        bindir = os.path.join(d, "bin")
+        os.makedirs(bindir)
+        modprobe = os.path.join(bindir, "modprobe")
+        with open(modprobe, "w") as f:
+            f.write('#!/bin/sh\necho "modprobe: FATAL: Module snd-aloop not found in directory /lib/modules/x"\nexit 1\n')
+        os.chmod(modprobe, 0o755)
+        self.modules = os.path.join(d, "modules")
+        os.makedirs(os.path.join(self.modules, os.uname().release))
+        self.env = {"SQTOOL_PROC_ASOUND": fake.root, "SQTOOL_MODULES": self.modules,
+                    "PATH": bindir + os.pathsep + os.environ.get("PATH", "")}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_messages(self):
+        from unittest import mock
+        from sqtool.alsa import load_loopback
+        with mock.patch.dict(os.environ, self.env):
+            ok, msg = load_loopback()
+            self.assertFalse(ok)
+            self.assertIn("Module snd-aloop not found", msg)
+            self.assertIn("sudo apt install linux-modules-extra-" + os.uname().release, msg)
+            os.environ["SQTOOL_MODULES"] = os.path.join(self.tmp.name, "nothing")
+            ok, msg = load_loopback()
+            self.assertFalse(ok)
+            self.assertIn("-v /lib/modules:/lib/modules:ro", msg)
 
 
 if __name__ == "__main__":

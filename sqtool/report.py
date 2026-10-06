@@ -105,7 +105,7 @@ def format_analysis(a: dict) -> str:
                 cap["alsa_format"], p, 1000.0 * p / rate, b, 1000.0 * b / rate, cap.get("access")))
         row("Stopped", cap.get("stop_reason", "?"))
         missed = cap.get("player_frames_before_capture")
-        if missed:
+        if missed and missed > 0:
             row("Start", "the player had already played about %s of this stream when the capture "
                 "began" % _dur(missed, rate))
         over = cap.get("capture_overruns", 0)
@@ -144,22 +144,22 @@ def _event_text(ev: dict, rate: int) -> str:
         return "%s: %s of the reference replaced by %s of different audio" % (
             at, _dur(ev["ref_frames"], rate), _dur(ev["cap_frames"], rate))
     if kind == "repeated":
-        return "%s: the stream jumped back and repeated %s" % (at, _dur(-ev["ref_frames"], rate))
+        return "%s: the stream jumped back and repeated %s" % (at, _dur(ev.get("repeated_frames", 0), rate))
+    if kind == "ending":
+        return "%s: playback stopped; the last %s before that differ (%s dBFS rms, a fade-out?)" % (
+            at, _dur(ev["cap_frames"], rate), _db(ev.get("diff_rms_db")))
     return "%s: %s" % (at, kind)
 
 
-def format_comparison(res: dict) -> str:
+def headline(res: dict) -> str:
+    pair = HEADLINES.get(res["verdict"], (res["verdict"],) * 2)
+    return pair[1] if res.get("ref_is_capture") else pair[0]
+
+
+def comparison_lines(res: dict) -> List[str]:
+    """The explanation under a comparison's headline, one finding per line."""
     ref, cap = res["ref"], res["cap"]
     rate = ref["rate"]
-    lines = []
-    second = "Compared" if res.get("ref_is_capture") else "Capture"
-    for name, f in (("Reference", ref), (second, cap)):
-        lines.append("%-10s %s" % (name, f["path"] or "(file)"))
-        lines.append("%-10s %s: %d ch, %d Hz, %.3f s" % ("", f["label"], f["channels"], f["rate"],
-                                                        f["frames"] / f["rate"] if f["rate"] else 0))
-    lines.append("")
-    pair = HEADLINES.get(res["verdict"], (res["verdict"],) * 2)
-    lines.append(pair[1] if res.get("ref_is_capture") else pair[0])
     other = "compared file" if res.get("ref_is_capture") else "capture"
     out = []
     if res.get("summary"):
@@ -169,9 +169,8 @@ def format_comparison(res: dict) -> str:
     if exact and res["verdict"] in ("IDENTICAL", "PARTIAL", "GAPS", "ALTERED"):
         if exact["lag"] >= 0:
             out.append("the reference starts %s into the %s" % (_secs(exact["lag"], rate), other))
-        compared = exact["exact_frames"]
-        out.append("%s frames compared bit for bit and identical (%.2f%% of the reference's audio "
-                   "is in the capture)" % (format(compared, ","), 100 * exact["covered_audio_fraction"]))
+        out.append("%s frames compared bit for bit and identical (%.2f%% of the reference's audio)"
+                   % (format(exact["exact_frames"], ","), 100 * exact["identical_audio_fraction"]))
         if exact["missing_start"]:
             out.append("the first %s of the reference %s not captured" % (
                 _secs(exact["missing_start"], rate),
@@ -185,20 +184,21 @@ def format_comparison(res: dict) -> str:
         if len(exact["events"]) > 20:
             out.append("... and %d more" % (len(exact["events"]) - 20))
         if exact.get("differs_from") is not None:
-            out.append("from %.3f s into the reference onwards the capture no longer matches "
-                       "(%s)" % (exact["differs_from"] / rate, _dur(exact.get("differing_frames", 0), rate)))
+            out.append("from %.3f s into the reference onwards the %s no longer matches "
+                       "(%s)" % (exact["differs_from"] / rate, other,
+                                 _dur(exact.get("differing_frames", 0), rate)))
         ref_res, cap_bits = res.get("ref_resolution"), cap["bits"]
         if (res["verdict"] in ("IDENTICAL", "PARTIAL") and not cap["is_float"] and ref_res
                 and ref_res < cap_bits):
             out.append("%d-bit samples carried in a %d-bit container (low bits zero): lossless padding"
                        % (ref_res, cap_bits))
-        if cap["is_float"] and not ref["is_float"]:
+        if res["verdict"] in ("IDENTICAL", "PARTIAL") and cap["is_float"] and not ref["is_float"]:
             out.append("integer samples carried as floating point without any change in value")
         for side in ("before", "after"):
             frames = exact.get("cap_" + side, 0)
             if frames:
-                out.append("the capture also holds %s of %s %s the reference" % (
-                    _secs(frames, rate),
+                out.append("the %s also holds %s of %s %s the reference" % (
+                    other, _secs(frames, rate),
                     "digital silence" if exact["cap_%s_silent" % side] else "other audio", side))
     approx = res.get("approx")
     if approx:
@@ -206,7 +206,20 @@ def format_comparison(res: dict) -> str:
             out.append("best alignment: the reference starts %s into the %s (correlation %.4f)"
                        % (_secs(approx["lag"], rate), other, approx.get("correlation", 0)))
         out.extend(approx.get("findings", []))
-    lines.extend("  - " + o for o in out)
+    return out
+
+
+def format_comparison(res: dict) -> str:
+    ref, cap = res["ref"], res["cap"]
+    lines = []
+    second = "Compared" if res.get("ref_is_capture") else "Capture"
+    for name, f in (("Reference", ref), (second, cap)):
+        lines.append("%-10s %s" % (name, f["path"] or "(file)"))
+        lines.append("%-10s %s: %d ch, %d Hz, %.3f s" % ("", f["label"], f["channels"], f["rate"],
+                                                        f["frames"] / f["rate"] if f["rate"] else 0))
+    lines.append("")
+    lines.append(headline(res))
+    lines.extend("  - " + o for o in comparison_lines(res))
     return "\n".join(lines)
 
 

@@ -5,23 +5,23 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import math
 import os
 import sys
 
 from . import __version__
 
 DESCRIPTION = """\
-Capture the exact PCM data an audio player sends to an ALSA device (through the
-snd-aloop loopback card) and compare it, sample by sample, with the source file
-or with another player's capture.
+Capture exactly what audio players send to a DAC and compare it, sample by
+sample, with the source file or with another player's capture.
 
-Typical session:
-  sq-tool status                     check that the Loopback card is there
-  sq-tool gen -o ~/Music/sq-test     write test tracks, add them to your library
-  sq-tool capture roon.wav           ...then press play in Roon (Loopback zone)
-  sq-tool capture mandarin.wav       ...then press play in Mandarin (hw:Loopback,0)
-  sq-tool compare ~/Music/sq-test/sq-test_24bit_96000Hz.wav roon.wav mandarin.wav
+The web interface (what the Docker image runs):
+  sq-tool serve --music ~/Music          then open http://<this machine>:3400
+
+From the command line:
+  sq-tool status                         sound cards and what they are being sent
+  sq-tool capture --usb roon.wav         record what the USB DAC receives (usbmon)
+  sq-tool capture roon.wav               record a player on the ALSA loopback card
+  sq-tool compare source.flac roon.wav mandarin.wav
 """
 
 
@@ -48,10 +48,25 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--bits", type=int, choices=(16, 24, 32), help="one track with this bit depth...")
     g.add_argument("--rate", type=int, help="...and this sample rate (default: a standard set)")
 
-    c = sub.add_parser("capture", help="record what a player sends to the Loopback card",
-                       description="Waits for a player to start on the Loopback card, then records "
-                       "exactly what it sends until it stops.")
+    w = sub.add_parser("serve", help="run the web interface (port 3400)")
+    w.add_argument("--data", default=os.environ.get("SQTOOL_DATA", "sq-data"),
+                   help="folder for tests: recordings, analyses and charts (default: ./sq-data)")
+    w.add_argument("--music", default=os.environ.get("SQTOOL_MUSIC", "/music"),
+                   help="your music folder, to pick songs from (default: /music)")
+    w.add_argument("--load-loopback", action="store_true",
+                   default=os.environ.get("SQTOOL_LOAD_LOOPBACK", "") not in ("", "0"),
+                   help="load the snd-aloop driver at start if there is no Loopback card (needs root)")
+    w.add_argument("--host", default="0.0.0.0", help="address to listen on (default: all)")
+    w.add_argument("--port", type=int, default=int(os.environ.get("PORT", "3400")),
+                   help="port (default 3400)")
+
+    c = sub.add_parser("capture", help="record what a player sends to a DAC",
+                       description="Waits for playback, then records exactly what the player sends "
+                       "until it stops. With --usb it records the USB packets going to a USB DAC "
+                       "(usbmon, needs root); otherwise it records from the ALSA loopback card.")
     c.add_argument("output", help="WAV file to write (metadata goes to OUTPUT.json)")
+    c.add_argument("--usb", nargs="?", const="", metavar="CARD",
+                   help="record what a USB DAC receives (optionally which card, by index or id)")
     c.add_argument("--duration", type=float, help="stop after this many seconds")
     c.add_argument("--silence-stop", type=float, default=5.0, metavar="SECONDS",
                    help="stop after this much digital silence following the music "
@@ -81,22 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _clean(obj):
-    """Make results JSON-safe (no NaN/inf, no numpy scalars)."""
-    if isinstance(obj, dict):
-        return {str(k): _clean(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_clean(v) for v in obj]
-    if hasattr(obj, "item"):
-        obj = obj.item()
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return None
-    return obj
-
-
 def _write_json(path: str, data) -> None:
+    from .sessions import clean
     with open(path, "w") as f:
-        json.dump(_clean(data), f, indent=2)
+        json.dump(clean(data), f, indent=2)
     print("Results written to %s" % path)
 
 
@@ -120,7 +123,49 @@ def cmd_gen(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    from .server import serve
+    serve(args.data, args.music, args.host, args.port, load_driver=args.load_loopback)
+    return 0
+
+
+def cmd_capture_usb(args) -> int:
+    import shutil
+    import tempfile
+    from .alsa import find_usb_dac
+    from .analysis import analyze_file
+    from .report import format_analysis
+    from .usbmon import UsbCapture
+    from .wavio import SIDECAR_SUFFIX, read_wav
+    dac = find_usb_dac(args.usb or None)
+    base, ext = os.path.splitext(args.output)
+    saved = []
+
+    def on_take(path, meta):
+        dest = args.output if not saved else "%s-%d%s" % (base, len(saved) + 1, ext or ".wav")
+        shutil.move(path, dest)
+        shutil.move(path + SIDECAR_SUFFIX, dest + SIDECAR_SUFFIX)
+        saved.append(dest)
+
+    with tempfile.TemporaryDirectory(dir=os.path.dirname(os.path.abspath(args.output))) as tmp:
+        cap = UsbCapture(dac, tmp, name=os.path.basename(base), idle_stop=args.silence_stop,
+                         max_seconds=args.duration, on_take=on_take)
+        try:
+            cap.run()
+        except KeyboardInterrupt:
+            cap.stop("stopped with Ctrl+C")
+    if not saved:
+        print("Nothing was recorded (%s)." % (cap.stop_reason or "no audio"))
+        return 1
+    for path in saved:
+        print()
+        print(format_analysis(analyze_file(read_wav(path))))
+    return 0
+
+
 def cmd_capture(args) -> int:
+    if args.usb is not None:
+        return cmd_capture_usb(args)
     from .alsa import Capture
     from .analysis import analyze_file
     from .report import format_analysis
@@ -191,7 +236,7 @@ def cmd_compare(args) -> int:
 
 
 COMMANDS = {"status": cmd_status, "gen": cmd_gen, "capture": cmd_capture,
-            "analyze": cmd_analyze, "compare": cmd_compare}
+            "analyze": cmd_analyze, "compare": cmd_compare, "serve": cmd_serve}
 
 
 def main(argv=None) -> int:
@@ -200,9 +245,8 @@ def main(argv=None) -> int:
     if not args.command:
         parser.print_help()
         return 2
-    try:
-        import numpy  # noqa: F401
-    except ImportError:
+    import importlib.util
+    if importlib.util.find_spec("numpy") is None:
         print("sq-tool needs numpy. Install it with:  sudo apt install python3-numpy  "
               "(Fedora: sudo dnf install python3-numpy, or: pip install numpy)", file=sys.stderr)
         return 2

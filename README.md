@@ -1,306 +1,279 @@
 # SQ-tool
 
-SQ-tool records the exact PCM samples an audio player hands to the sound driver
-and compares them, sample by sample, with the source file or with another
-player's recording. It answers the "bits are bits" question with data:
-does Roon (or any other player) deliver the same samples as Mandarin, and if
-not, exactly how do they differ?
+**Is your music player bit-perfect? SQ-tool records exactly what Roon, Mandarin
+or any other player sends to its output, and compares it sample by sample with
+the original file and with each other.**
+
+It runs in Docker on the computer your players run on. You use it from a phone
+or tablet at `http://<server>:3400`:
+
+1. **Choose a song** from your music folder, for example a Qobuz download.
+   SQ-tool reads and analyses the file.
+2. **Record Roon.** Press *Record*, then play the song in Roon to the
+   **Loopback** output. SQ-tool records every sample Roon sends.
+3. **Record Mandarin** the same way.
+4. **Read the results.**
+   * Is Roon bit-perfect? Is Mandarin? In other words, is every sample they
+     send identical to the file?
+   * Do both send the same data? That is, would your DAC convert exactly the
+     same numbers from both?
+   * Detailed, zoomable **spectrograms**: the file, what each player sent, and
+     the differences between them.
+   * **Charts**: spectrum, level over time, what remains after matching levels,
+     a sample-by-sample close-up of the waveforms, and bit usage.
+   * **Details** of each: format, bits in use, peak, loudness, a fingerprint of
+     the sample data, the player's buffer sizes, and CPU load.
+   * **Downloads**: each recording, and the differences as WAV files.
 
 ```
-player ──► hw:Loopback,0 ═══ snd-aloop ═══ hw:Loopback,1 ──► arecord ──► sq-tool ──► WAV + JSON
+song.flac ──► Roon ──────┐
+                         ├──► Loopback (a virtual sound card) ──► SQ-tool ──► :3400 on your tablet
+song.flac ──► Mandarin ──┘
 ```
 
-The player plays to Linux's loopback sound card just as it would play to a USB
-DAC. Whatever it writes comes out of the other end of the loopback untouched,
-and SQ-tool records it in the exact format the player chose.
+## Install
 
-## What it can and cannot tell you
-
-It **can** tell you:
-
-* whether the samples are **bit-identical** to the source file (bit-perfect), or
-  to another player's capture;
-* if they are not, **how** they differ:
-  * level changes (volume, leveling, headroom management);
-  * dither, rounding or truncation, and to how many bits;
-  * resampling;
-  * EQ or filtering (the frequency response relative to the source);
-  * polarity, swapped or mixed channels;
-  * inserted silence (player buffer underruns);
-  * lost samples;
-* what the player actually sends: the sample format (S16/S24/S32/float), the
-  sample rate, and the period and buffer sizes it uses;
-* how busy the machine was during playback (CPU use per process).
-
-It **cannot** see anything after the samples leave the computer: the electrical
-signal on the USB cable, timing jitter on the wire, noise coupled through USB
-or ground, or what the DAC does. With a USB DAC, Linux's USB audio driver
-copies these same samples into USB packets unchanged. So if two players
-produce identical captures, the DAC receives identical data from both. Any
-audible difference then has to come from somewhere else: electrical or
-system-load effects, or the listening test itself. Matching levels and
-listening blind is the way to check that.
-
-## Requirements
-
-* Linux with ALSA (any distribution), Python 3.8 or newer
-* numpy, and `arecord` from alsa-utils
-* optional: ffmpeg (or `flac`) to use FLAC, ALAC, AIFF and similar files as references
+You need the Linux computer that runs Roon Server and Mandarin, with Docker,
+and your music folder on it. Run:
 
 ```sh
-sudo apt install python3-numpy alsa-utils ffmpeg     # Debian / Ubuntu
-sudo dnf install python3-numpy alsa-utils ffmpeg     # Fedora
-sudo pacman -S python-numpy alsa-utils ffmpeg        # Arch
+docker run -d --name sq-tool --restart unless-stopped \
+  --privileged --pid=host \
+  -v /dev/snd:/dev/snd \
+  -v /lib/modules:/lib/modules:ro \
+  -v /path/to/your/music:/music:ro \
+  -v sq-tool-data:/data \
+  -p 3400:3400 \
+  ghcr.io/meltface-80/sq-tool:latest
 ```
 
-To open the loopback device, your user must be in the `audio` group, or you
-can run `capture` with `sudo`.
+Replace `/path/to/your/music` with your music folder, the one Roon and Mandarin
+play from. Then open `http://<server-address>:3400` on your phone or tablet, for
+example `http://192.168.1.20:3400`.
 
-Get the tool:
+What the options do:
+
+| Option | Why |
+|---|---|
+| `--privileged` | lets SQ-tool see the sound cards (`/proc/asound`) and load the Loopback driver |
+| `--pid=host` | shows which program sent the audio (RAATServer, mandarin, …) |
+| `-v /dev/snd:/dev/snd` | the sound devices, including the Loopback card once it is loaded |
+| `-v /lib/modules:/lib/modules:ro` | your kernel's drivers, so SQ-tool can load the Loopback driver (`snd-aloop`) itself |
+| `-v /path/to/your/music:/music:ro` | your music, read-only, to choose the song from |
+| `-v sq-tool-data:/data` | keeps your tests when the container is updated |
+| `-p 3400:3400` | the web page |
+
+**The Loopback card.** SQ-tool loads it when it starts, and there is a button
+for it on the page. The first time it appears, **restart Roon Server** so Roon
+lists the new output. To load it at every boot, before Roon starts:
 
 ```sh
-git clone https://github.com/meltface-80/SQ-tool.git
-cd SQ-tool
-./sq-tool --help          # runs straight from the checkout (or: pip install .)
+echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
 ```
 
-## Step by step: Roon vs Mandarin
-
-### 1. Load the loopback sound card
+**Updating:**
 
 ```sh
-sudo modprobe snd-aloop
-echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf   # also load it at boot
-sudo systemctl restart roonserver                              # so Roon sees the new device
-./sq-tool status
+docker pull ghcr.io/meltface-80/sq-tool:latest
+docker rm -f sq-tool
+# then run the docker run command again
 ```
 
-`status` should list a card called `Loopback`. It also shows what every card is
-receiving right now, so it is worth running while you play to your real DAC
-too (see [Match your DAC](#match-your-dac)).
+Your tests stay in the `sq-tool-data` volume.
 
-### 2. Make test tracks
+**The image.** GitHub builds it on every push:
+
+* `:latest` comes from the `main` branch.
+* Each other branch gets its own tag, named after the branch with `/` turned
+  into `-`.
+
+If `docker pull` asks you to log in, the package isn't public yet. Make it
+public once: on GitHub, go to *Your profile → Packages → sq-tool → Package
+settings → Change visibility → Public*. Or build the image yourself:
 
 ```sh
-./sq-tool gen -o ~/Music/sq-test
+docker build -t sq-tool https://github.com/meltface-80/SQ-tool.git#main
 ```
 
-This writes four 15.5-second WAV files: 16-bit/44.1 kHz, 24/44.1, 24/96 and
-24/192. Each contains:
+Then use `sq-tool` instead of `ghcr.io/meltface-80/sq-tool:latest` in the run
+command.
 
-* 2 s of digital silence;
-* white noise;
-* loud and very quiet tones (997 Hz left, 1499 Hz right);
-* sweeps from 20 Hz to 20 kHz;
-* 2 s of silence at the end.
+## Setting up the players
 
-Every one of those sections exposes a different kind of change. Add the folder
-to both Roon's and Mandarin's library. These are test signals, not music: keep
-the volume down if they ever play through speakers.
+**Roon**
 
-You can also use your own music as the reference (WAV directly; FLAC and
-others when ffmpeg or flac is installed).
+1. Open *Settings → Audio*. Under your Roon Server, find **Loopback** and press
+   **Enable**. If it's listed twice, either one works. Name the zone, for
+   example "SQ-tool".
+2. In that zone's *Device Setup*, use the same settings as your DAC's zone, so
+   the test shows what your DAC gets.
+   * For a pure bit-perfect check, set *Volume control* to **Fixed volume**.
+   * Turn off everything in the zone's *DSP Engine*: volume leveling, headroom
+     management, sample rate conversion, EQ, crossfeed, convolution.
+3. When testing, play the song to that zone.
 
-### 3. Set up the Loopback zone in Roon
+**Mandarin** (or any other player): choose the output device **Loopback**
+(`hw:Loopback,0`, or `hw:N,0` with the card number the page shows), the same
+way you would choose your DAC.
 
-In *Settings → Audio*, the Loopback card appears among the Roon Server's
-devices, possibly twice (`hw:…,0` and `hw:…,1`). Enable one of them. SQ-tool
-watches both.
+## Using it
 
-For a bit-perfect baseline:
+* **Start a new test** and pick the song: browse your music folder, search it,
+  or upload the file from your phone or tablet. SQ-tool reads FLAC, WAV and
+  AIFF files.
+* Press **Record Roon**. SQ-tool waits for playback on the Loopback card. Then
+  play the song in Roon, from the beginning. Recording starts when Roon starts
+  sending audio, and stops by itself:
+  * at the end of the song;
+  * when Roon closes the output;
+  * or after 5 seconds of digital silence (this can be changed in Settings).
 
-* set the zone's volume control to *Fixed*;
-* turn off everything in its DSP engine: volume leveling, headroom management,
-  sample rate conversion, EQ, crossfeed, convolution.
+  You can also press **Stop now**.
+* Press **Record Mandarin** and do the same.
+* **Results** appear as soon as each recording is analysed: one card for each
+  player against the file, and one for the two players against each other.
+* **Record again** replaces a player's recording, for example after you change
+  a setting in Roon.
+* The player names can be changed in Settings (for new tests) or with **⋯** on
+  a test. **⋯** also deletes a test.
 
-Roon's signal path view should then show the stream as lossless. After that,
-switch features back on one at a time if you want to see exactly what each
-one does to the data.
+### The spectrograms
 
-### 4. Capture Roon
+There is one picture per recording, all lined up on the song's timeline and on
+one colour scale, from black (the lowest level, −150 dB by default) to pale
+yellow (0 dB, full scale).
 
-```sh
-./sq-tool capture roon-96k.wav
-```
+* **What each one sent** shows the file, Roon and Mandarin. If they are
+  identical, the pictures are identical.
+* **Differences** shows what is left when one recording is subtracted from the
+  other, sample by sample: Roon − file, Mandarin − file and Mandarin − Roon.
+  **Black means no difference at all.**
+  * **Match levels first** removes a plain volume difference before
+    subtracting. It shows what else changed, such as dither or EQ.
+* **Drag** across the pictures to zoom into that part of the song, down to a
+  few milliseconds. Use the buttons to zoom out, move, or go back to the whole
+  song.
+* **Tap** (or hover with a mouse) to read the time and frequency.
+* **Log / Linear** sets the frequency scale, and the menu sets the lowest level
+  shown. Lower it (−180 or −210 dB) to see dither at 24 bits.
+* Each column of pixels covers its whole stretch of time: SQ-tool analyses
+  every part of it and shows the loudest value, so a short click can't fall
+  between pixels.
+  * Some differences are far below the colour scale, such as one sample off
+    by its last bit. The verdict and the timeline under it still catch them.
 
-SQ-tool waits for a player. Now play `sq-test_24bit_96000Hz.wav` in the
-Loopback zone. SQ-tool picks up Roon's format, records, and stops by itself
-when one of these happens:
-
-* Roon closes the device;
-* 5 s of digital silence follow the music;
-* you press Ctrl+C.
-
-It then prints an analysis of what it recorded and writes `roon-96k.wav` plus
-`roon-96k.wav.json`, which holds the capture details.
-
-### 5. Capture Mandarin
-
-Point Mandarin at `hw:Loopback,0` (or `hw:CARD=Loopback,DEV=0`). Use a plain
-`hw:` device, not `plughw:`, `default` or PulseAudio/PipeWire: those layers can
-resample or change the volume, and SQ-tool will faithfully report that they
-did.
-
-```sh
-./sq-tool capture mandarin-96k.wav     # then press play in Mandarin
-```
-
-### 6. Compare
-
-```sh
-./sq-tool compare ~/Music/sq-test/sq-test_24bit_96000Hz.wav roon-96k.wav mandarin-96k.wav
-```
-
-Each capture is compared with the source, and then the captures are compared
-with each other. Below is example output, made from simulated captures by the
-test suite. It is not a real Roon or Mandarin result. `player-a` is
-bit-perfect, and `player-b` applied -0.5 dB of digital volume with dither:
-
-```
-Reference  sq-test_24bit_96000Hz.wav
-           WAV PCM 24-bit: 2 ch, 96000 Hz, 15.500 s
-Capture    player-a.wav
-           captured ALSA S32_LE: 2 ch, 96000 Hz, 16.000 s
-
-BIT-PERFECT: every sample of the reference arrives unchanged.
-  - the reference starts 0.250 s into the capture
-  - 1,488,000 frames compared bit for bit and identical (100.00% of the reference's audio is in the capture)
-  - 24-bit samples carried in a 32-bit container (low bits zero): lossless padding
-  - the capture also holds 0.250 s of digital silence before the reference
-  - the capture also holds 0.250 s of digital silence after the reference
-
-Reference  sq-test_24bit_96000Hz.wav
-           WAV PCM 24-bit: 2 ch, 96000 Hz, 15.500 s
-Capture    player-b.wav
-           captured ALSA S32_LE: 2 ch, 96000 Hz, 16.000 s
-
-NOT BIT-PERFECT: the samples differ throughout.
-  - best alignment: the reference starts 0.250 s into the capture (correlation 1.0000)
-  - level changed: -0.500 dB, -0.500 dB (by channel)
-  - frequency response flat within 0.000 dB across 39 Hz-32.0 kHz
-  - remaining difference -144.5 dBFS rms: consistent with dither at 24-bit output (about 0.50 LSB rms)
-  - where the reference is digital silence, the capture is not: -144.5 dBFS rms (dither or noise added)
-...
-Summary
-  player-a.wav  vs  sq-test_24bit_96000Hz.wav : BIT-PERFECT
-  player-b.wav  vs  sq-test_24bit_96000Hz.wav : NOT BIT-PERFECT
-  player-b.wav  vs  player-a.wav : DIFFERENT
-```
-
-The exit status is 0 when everything is identical, 1 when something differs and
-2 on errors, so the comparison can be scripted. `--json FILE` saves all the
-numbers.
-
-## Reading the verdicts
+## Reading the results
 
 | Verdict | Meaning |
 |---|---|
-| **BIT-PERFECT** / **IDENTICAL** | Every sample matches. Leading and trailing silence and container padding are allowed: a 16-bit sample sent as S32_LE has the same value. |
-| **BIT-PERFECT WHERE CAPTURED** | Everything captured matches, but some of the reference's audio was not captured, usually because the capture started late or stopped early. |
-| **SAME SAMPLES, WITH INTERRUPTIONS** | The data matches, but the stream has gaps. *Inserted silence* is a player buffer underrun, which would be a dropout on a real DAC. *Missing frames* means samples were lost. |
-| **ALTERED** | Most of the stream matches, but listed places differ. |
-| **NOT BIT-PERFECT** / **DIFFERENT** | The samples differ throughout. The findings say how: level, dither or rounding, frequency response, channel mixing, noise in silent parts, reduced resolution. |
-| **RESAMPLED** / **CHANNELS** | The sample rate or channel count changed, so the player converted the audio. |
+| **BIT-PERFECT** | Every sample the player sent equals the sample in the file. Silence before and after the song is allowed, and so is a bigger container: 16-bit samples sent as 32-bit words keep their values. |
+| **BIT-PERFECT** with part of the song missing | Every recorded sample matches, but part of the song isn't in the recording, for example because playback was stopped early. |
+| **DROPOUTS** | The samples are unchanged, but the stream has gaps or jumps: silence inserted (an underrun), samples lost, or audio repeated. |
+| **ALTERED** | Most of the stream matches the file; some parts differ. |
+| **NOT BIT-PERFECT** | The samples differ throughout. SQ-tool says how: a level change, dither, rounding, EQ, channel changes. |
+| **RESAMPLED** | The player sent a different sample rate from the file's. |
+| **SAME DATA / DIFFERENT DATA** | Roon against Mandarin: whether your DAC would convert exactly the same numbers from both. |
 
-A level difference is worth knowing about even when it is tiny. In a listening
-comparison, the louder of two otherwise identical sources tends to sound
-"better", and differences of a few tenths of a dB are enough.
+For a player that is not bit-perfect, the numbers mean:
 
-## Other commands
+* **level**: the volume difference, for example −0.50 dB.
+* **what remains after matching the level**: how far below the music the rest
+  of the difference lies, and its level in dBFS rms. It is typically one of
+  these:
+  * dither: about −144 dBFS at 24 bits, or −96 dBFS at 16 bits;
+  * plain rounding: about −149 dBFS at 24 bits, or −101 dBFS at 16 bits;
+  * or, if higher, a sign of heavier processing.
 
-* `./sq-tool analyze FILE...` describes captures or files:
-  * format, and how many bits are really in use (for example "16 significant
-    bits: the low 16 bits are zero");
-  * silence at the start and end, peak and RMS levels, clipping;
-  * DoP (DSD over PCM) detection;
-  * a **fingerprint**: a SHA-256 of the sample values. Files carrying the same
-    samples have the same fingerprint even in different containers, such as a
-    16-bit WAV and an S32_LE capture.
+## What it can and cannot tell you
 
-  For captures it also shows:
-  * who sent the data, and their period and buffer sizes;
-  * whether the capture had overruns;
-  * CPU use during playback. Roon's work is spread over several processes
-    (RoonAppliance, RAATServer…); the busiest ones are listed.
-* `./sq-tool status [-v]` lists the sound cards and every playback stream that
-  is open right now: format, rate, period and buffer, and which process owns
-  it. `-v` adds the USB stream details of USB DACs.
+* The Loopback card receives exactly the samples a player sends to an ALSA
+  output. If the Loopback zone has the same settings as your DAC's zone, those
+  are the samples your DAC gets.
+* A player may package the same samples differently for different devices:
+  16-bit samples in 32-bit words, say, or packed 24-bit. SQ-tool compares the
+  sample values, so the same values in another container count as identical.
+  The *Details* table shows each format.
+* It cannot measure what happens electrically: jitter, noise on the USB cable
+  or ground, or the DAC's own behaviour.
 
-## Match your DAC
+If both players send identical data, your DAC converts the same numbers from
+both. Any audible difference then comes from somewhere else: electrical or
+system-load effects, or the listening test itself. Level-matched blind
+listening is the way to check that. Even a few tenths of a dB of level
+difference can make one player sound "better" in a sighted comparison.
 
-The loopback accepts almost any format: 8 kHz to 768 kHz, 16/24/32-bit integer
-and 32-bit float. A player may therefore choose a different output format for
-it than for your real DAC.
+**Recording the USB DAC itself.** With a USB DAC, SQ-tool can also record the
+USB packets on their way to the DAC (Linux's `usbmon`), instead of the Loopback
+card. Choose your DAC in *Settings → Record from*, and load usbmon on the
+server first:
 
-To see what the player really sends your DAC, play to the DAC and run
-`./sq-tool status` (for example `S32_LE, 96000 Hz, 2 ch` and `player:
-RAATServer`). Then make the Loopback zone use the same format. In Roon, set
-the device's maximum sample rate and bit depth to what the DAC supports.
+```sh
+sudo modprobe usbmon
+```
 
-## Good to know
+The players then play to the DAC as usual.
 
-* **The first milliseconds.** SQ-tool starts recording when the player opens
-  the device, a few milliseconds after it starts. The test tracks begin with 2
-  s of silence, so nothing is lost. For your own music, the report says
-  whether any audio at the start was missed.
-  `--prearm S32_LE:44100:2` starts recording before the player does, but it
-  forces the player to use exactly that format. Use it only once you know
-  what the player picks.
-* **One format per capture.** While a capture is open, the loopback holds both
-  ends to one sample format and rate. SQ-tool lets go as soon as the player
-  closes the device. Capture one track, or an album at a single sample rate,
-  per run. If the next track in the queue has a different rate, the player
-  may complain or resample it.
-* **Overruns.** If the machine is so busy that the capture falls behind, the
-  report says so. Re-run the capture rather than trust it.
-* **DSD.** DoP streams are recognised and compared like PCM (captures from two
-  players can be compared with each other). Native DSD formats are not
-  captured.
+## Getting a fair comparison
+
+* Play the same file in both players, from the beginning.
+* Record the same player twice. The two recordings should be identical, which
+  shows the measurement itself is consistent.
+* Recording starts a moment after the player starts. Most songs begin with
+  digital silence, so nothing is lost. If a song starts with sound right away,
+  its first few milliseconds may be missing. The verdict then says so, and
+  everything recorded is still compared.
 
 ## Troubleshooting
 
-* **Roon does not list the Loopback device.** Check that `aplay -l` shows the
-  Loopback card, then restart Roon Server (`sudo systemctl restart roonserver`).
-* **`arecord ... Permission denied`.** Add yourself to the audio group
-  (`sudo usermod -aG audio $USER`, then log out and back in), or run the
-  capture with `sudo`.
-* **`Device or resource busy`.** Something else already has the capture side of
-  that loopback device open, for example another capture or a DSP program
-  such as CamillaDSP. Stop it first.
-* **"Player found" appears before you press play.** Some players keep the
-  device open while idle. Press Ctrl+C, press play, then start the capture
-  within the first two seconds (the test tracks start with 2 s of silence).
-* **The captured format is not what you expected.** See
-  [Match your DAC](#match-your-dac). `sq-tool analyze` shows the format, period
-  and buffer the player used.
+* **"The Loopback sound card is not loaded"**: press *Load the Loopback driver
+  now*. If there is no button, add `-v /lib/modules:/lib/modules:ro` and
+  `--privileged` to the run command, or run `sudo modprobe snd-aloop` on the
+  server.
+* **"Module snd-aloop not found"**: on Ubuntu the driver is in a separate
+  package. Install it on the server with
+  `sudo apt install linux-modules-extra-$(uname -r)`.
+* **Roon doesn't list Loopback**: restart Roon Server after the Loopback card
+  appears.
+* **The recording never starts**: the player isn't playing to the Loopback
+  card. The start page shows what is playing on it right now. Check that the
+  player's output is Loopback, device 0 (`hw:N,0`).
+* **"Your music folder is not connected"**: add `-v /path/to/your/music:/music:ro`
+  to the run command, or upload the song from your phone or tablet instead.
+* **"The sound cards are hidden from this container"**: add `--privileged`.
+* **The sending program isn't shown**: add `--pid=host`.
 
-## How the comparison works
+## Security
 
-SQ-tool first looks for an exact match: a distinctive stretch of the reference
-that appears unchanged in the capture. From there it walks along both files
-and records every place where they stop matching. If matching resumes later,
-the jump is classified as:
+The web page has no login, so keep port 3400 on your home network. SQ-tool only
+reads your music folder.
 
-* inserted frames: an underrun when they are silence;
-* dropped frames;
-* altered samples.
+## Command line
 
-If no exact match exists at all, it aligns the files by correlation instead.
-It then fits the capture to the reference with a gain and channel matrix and
-analyses what is left over:
+The same code runs without Docker:
 
-* the size and spectrum of the residual, and its relation to the output's
-  least significant bit;
-* the frequency response;
-* how the level changes over time;
-* what happens in passages where the reference is digital silence.
+```sh
+sudo apt install python3-numpy alsa-utils flac   # Debian/Ubuntu; Python 3.8+
+sudo modprobe snd-aloop
+./sq-tool serve --music ~/Music                  # the web interface, as in Docker
+./sq-tool status                                 # sound cards and what they are being sent
+./sq-tool capture roon.wav                       # record a player on the loopback card
+./sq-tool compare song.flac roon.wav mandarin.wav
+./sq-tool analyze roon.wav
+```
 
 ## Tests
 
 ```sh
+pip install numpy
 python3 -m unittest discover -s tests
 ```
 
-The tests need no sound hardware. They simulate the loopback card's `/proc`
-entries and `arecord`, and check the comparison against known manipulations
-(gain, dither, truncation, EQ, crossfeed, swaps, underruns, dropouts).
+The tests need no audio hardware. They simulate:
+
+* the Loopback card (`/proc/asound` and `arecord`);
+* players that play a song to it;
+* a USB DAC's packets, as usbmon delivers them.
+
+They cover recording, comparisons against known changes (gain, dither,
+truncation, EQ, crossfeed, channel swaps, dropouts, repeats, resampling), the
+spectrograms, and the whole web API.

@@ -17,8 +17,37 @@ CARDS = """ 0 [PCH            ]: HDA-Intel - HDA Intel PCH
                       HDA Intel PCH at 0xf7f10000 irq 32
  1 [Loopback       ]: Loopback - Loopback
                       Loopback 1
- 2 [D90            ]: USB-Audio - Topping D90
-                      Topping D90 at usb-0000:00:14.0-2, high speed
+ 2 [SU1            ]: USB-Audio - SMSL SU-1
+                      SMSL SU-1 at usb-0000:00:14.0-2, high speed
+"""
+
+
+STREAM0 = """SMSL SU-1 at usb-0000:00:14.0-2, high speed : USB Audio
+
+Playback:
+  Status: Stop
+  Interface 1
+    Altset 1
+    Format: S32_LE
+    Channels: 2
+    Endpoint: 0x01 (1 OUT) (ASYNC)
+    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000
+    Data packet interval: 125 us
+    Bits: 32
+    Channel map: FL FR
+    Sync Endpoint: 0x81 (1 IN)
+    Sync EP Interface: 1
+    Sync EP Altset: 1
+    Implicit Feedback Mode: No
+  Interface 1
+    Altset 2
+    Format: DSD_U32_BE
+    Channels: 2
+    Endpoint: 0x01 (1 OUT) (ASYNC)
+    Rates: 705600, 768000, 1411200, 1536000
+    Data packet interval: 125 us
+    Bits: 32
+    DSD raw: DOP=0, bitrev=0
 """
 
 
@@ -70,6 +99,14 @@ class FakeLoopback:
                         d = self.subdir(dev, stream, sub, card)
                         os.makedirs(d, exist_ok=True)
                         self._write(d, "closed\n", "closed\n")
+
+        # Card 2 is a USB DAC: where it sits on the bus and its playback endpoint.
+        with open(os.path.join(root, "card2", "usbbus"), "w") as f:
+            f.write("001/005\n")
+        with open(os.path.join(root, "card2", "usbid"), "w") as f:
+            f.write("262a:18a1\n")
+        with open(os.path.join(root, "card2", "stream0"), "w") as f:
+            f.write(STREAM0)
 
     def subdir(self, dev=0, stream="p", sub=0, card=1):
         return os.path.join(self.root, "card%d" % card, "pcm%d%s" % (dev, stream), "sub%d" % sub)
