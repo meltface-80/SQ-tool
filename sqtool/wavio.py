@@ -403,6 +403,19 @@ class WavWriter:
         self.close()
 
 
+def float_wav_header(rate: int, channels: int, frames: int) -> bytes:
+    """Header of a plain 32-bit float WAV file holding `frames` frames (for streaming)."""
+    data = frames * channels * 4
+    if data + 58 > 0xFFFFFFFF:
+        raise ValueError("too long for a WAV file")
+    fmt = struct.pack("<HHIIHHH", WAVE_FORMAT_IEEE_FLOAT, channels, rate, rate * channels * 4,
+                      channels * 4, 32, 0)
+    return (b"RIFF" + struct.pack("<I", 4 + 8 + len(fmt) + 12 + 8 + data) + b"WAVE"
+            + b"fmt " + struct.pack("<I", len(fmt)) + fmt
+            + b"fact" + struct.pack("<II", 4, frames)
+            + b"data" + struct.pack("<I", data))
+
+
 def write_wav(path: str, audio: Audio, extra_chunks=()) -> None:
     with WavWriter(path, audio.rate, audio.channels, audio.bits, audio.is_float,
                    extra_chunks=extra_chunks) as w:

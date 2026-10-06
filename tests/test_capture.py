@@ -85,6 +85,22 @@ class CaptureRun(unittest.TestCase):
         self.assertEqual(res["verdict"], "IDENTICAL")
         self.assertEqual(res["exact"]["missing_start"], 1000)
 
+    def test_arecord_runs_untranslated_with_short_periods(self):
+        proc = self.start([], self.pcm(self.src, "S32_LE"), 8)
+        time.sleep(0.3)
+        self.fake.play()
+        self.finish(proc)
+        self.assertEqual(self.arecord_calls()[0][-4:], ["-B", "500000", "-F", "25000"])
+        with open(self.args_log + ".env") as f:
+            self.assertEqual(f.read().split(), ["LC_ALL=C"])
+
+    def test_prearm_with_only_silence_is_an_error(self):
+        silent = self.pcm(np.zeros((RATE, 2), np.int32), "S32_LE", "silence.pcm")
+        proc = self.start(["--prearm", "S32_LE:44100:2", "--wait", "1"], silent, 8, close_dir=False)
+        text = self.finish(proc, expect_code=2)
+        self.assertIn("only silence was captured", text)
+        self.assertFalse(os.path.exists(self.out))
+
     def test_formats_and_the_other_loopback_device(self):
         for fmt, width in (("S24_3LE", 3), ("S24_LE", 4), ("S16_LE", 2), ("FLOAT_LE", 4)):
             with self.subTest(fmt=fmt):
@@ -200,8 +216,8 @@ class ProcParsing(unittest.TestCase):
                 cards = list_cards()
                 self.assertEqual([(c.index, c.id, c.driver) for c in cards],
                                  [(0, "PCH", "HDA-Intel"), (1, "Loopback", "Loopback"),
-                                  (2, "D90", "USB-Audio")])
-                self.assertEqual(cards[2].name, "Topping D90")
+                                  (2, "SU1", "USB-Audio")])
+                self.assertEqual(cards[2].name, "SMSL SU-1")
                 fake.play("S32_LE", 44100, 2, card=2)
                 report = status_report()
                 self.assertIn("<- loopback", report)

@@ -25,7 +25,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -47,6 +47,10 @@ Then restart Roon Server (or your player) so it lists the new "Loopback" device.
 
 class CaptureError(Exception):
     pass
+
+
+class CaptureStopped(CaptureError):
+    """The capture was stopped before any playback started."""
 
 
 def proc_asound() -> str:
@@ -191,6 +195,103 @@ def list_subs(card: int, stream: str = "p", device: Optional[int] = None) -> Lis
     return subs
 
 
+@dataclass
+class UsbAudio:
+    """A USB audio card: where it sits on the USB bus and its playback endpoints."""
+    card: Card
+    bus: int
+    dev: int
+    usb_id: str
+    endpoints: List[int]  # isochronous OUT endpoint addresses used for playback
+    formats: List[str]
+    rates: List[str]
+
+    def describe(self) -> dict:
+        return {"card": self.card.index, "id": self.card.id, "name": self.card.name,
+                "usb_id": self.usb_id, "bus": self.bus, "dev": self.dev,
+                "endpoints": ["0x%02x" % e for e in self.endpoints],
+                "formats": self.formats, "rates": self.rates}
+
+
+_ENDPOINT_RE = re.compile(r"Endpoint:\s*0x([0-9a-fA-F]+)\s*\(\d+\s+(IN|OUT)\)")
+
+
+def parse_stream_playback(text: str) -> Tuple[List[int], List[str], List[str]]:
+    """Endpoints, formats and rates of the Playback section of /proc/asound/cardN/streamM."""
+    endpoints: List[int] = []
+    formats: List[str] = []
+    rates: List[str] = []
+    section = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped in ("Playback:", "Capture:"):
+            section = stripped
+            continue
+        if section != "Playback:":
+            continue
+        m = _ENDPOINT_RE.search(stripped)
+        if m and m.group(2) == "OUT":
+            ep = int(m.group(1), 16)
+            if ep not in endpoints:
+                endpoints.append(ep)
+        elif stripped.startswith("Format:"):
+            for f in stripped[len("Format:"):].split():
+                if f not in formats:
+                    formats.append(f)
+        elif stripped.startswith("Rates:"):
+            r = stripped[len("Rates:"):].strip()
+            if r not in rates:
+                rates.append(r)
+    return endpoints, formats, rates
+
+
+def usb_audio_info(card: Card) -> Optional[UsbAudio]:
+    base = os.path.join(proc_asound(), "card%d" % card.index)
+    usbbus = (_read(os.path.join(base, "usbbus")) or "").strip()
+    m = re.match(r"^(\d+)/(\d+)$", usbbus)
+    if not m:
+        return None
+    endpoints: List[int] = []
+    formats: List[str] = []
+    rates: List[str] = []
+    for path in sorted(glob.glob(os.path.join(base, "stream*"))):
+        e, f, r = parse_stream_playback(_read(path) or "")
+        endpoints += [x for x in e if x not in endpoints]
+        formats += [x for x in f if x not in formats]
+        rates += [x for x in r if x not in rates]
+    if not endpoints:
+        return None
+    usb_id = (_read(os.path.join(base, "usbid")) or "").strip()
+    return UsbAudio(card, int(m.group(1)), int(m.group(2)), usb_id, endpoints, formats, rates)
+
+
+def usb_dacs() -> List[UsbAudio]:
+    return [u for u in (usb_audio_info(c) for c in list_cards()) if u is not None]
+
+
+def find_usb_dac(want: Optional[str] = None) -> UsbAudio:
+    """The USB DAC named by `want` (card index or id), or the only/first one."""
+    dacs = usb_dacs()
+    if want is not None:
+        for d in dacs:
+            if str(d.card.index) == str(want) or d.card.id == want:
+                return d
+        raise CaptureError("no USB audio card %r with a playback endpoint (see `sq-tool status`)" % want)
+    if not dacs:
+        raise CaptureError("no USB audio DAC found. Is it connected and switched on?")
+    return dacs[0]
+
+
+def playback_streams(card_index: int) -> List[Tuple[PcmSub, dict, Optional[dict]]]:
+    """(substream, status, hw_params) for each open playback substream of a card."""
+    out = []
+    for sub in list_subs(card_index, "p"):
+        st = sub.status()
+        if st:
+            out.append((sub, st, sub.hw_params()))
+    return out
+
+
 def process_info(pid: Optional[int]) -> dict:
     if not pid:
         return {}
@@ -307,7 +408,7 @@ class Capture:
                  silence_stop: float = 5.0, wait: Optional[float] = None,
                  prearm: Optional[Tuple[str, int, int]] = None, device: Optional[int] = None,
                  subdevice: Optional[int] = None, arecord: str = "arecord", poll: float = 0.01,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, handle_sigint: bool = True):
         self.out_path = out_path
         self.card_want = card
         self.duration = duration
@@ -319,6 +420,31 @@ class Capture:
         self.arecord = arecord
         self.poll = poll
         self.log = log
+        self.handle_sigint = handle_sigint
+        self.started = time.monotonic()
+        self.state = "starting"
+        self.message = ""
+        self.frames = 0
+        self.params: Optional[dict] = None
+        self.owner: dict = {}
+        self.stop_reason: Optional[str] = None
+        self._user_stop = threading.Event()
+        self._proc = None
+
+    def stop(self, reason: str = "stopped by user") -> None:
+        """Stop from another thread: ends the wait for a player, or the recording."""
+        self._user_stop.set()
+        if self._proc is not None and self._proc.poll() is None:
+            self._request_stop(reason)
+
+    def status(self) -> dict:
+        out = {"method": "loopback", "state": self.state, "message": self.message,
+               "elapsed": round(time.monotonic() - self.started, 1), "stop_reason": self.stop_reason}
+        if self.params and self.state == "recording":
+            out["take"] = {"format": self.params["format"], "rate": self.params["rate"],
+                           "channels": self.params["channels"], "player": self.owner,
+                           "seconds": round(self.frames / self.params["rate"], 2)}
+        return out
 
     # -- finding the player -------------------------------------------------
 
@@ -339,9 +465,13 @@ class Capture:
 
     def _wait_for_player(self, card: Card, started: float) -> Tuple[PcmSub, dict]:
         subs = self._candidates(card)
+        self.state = "waiting"
+        self.message = "Waiting for playback on the loopback card"
         self.log("Waiting for a player on the loopback card (%s or %s). Start playback now; "
                  "Ctrl+C gives up." % ("hw:%d,0" % card.index, "hw:%d,1" % card.index))
         while True:
+            if self._user_stop.is_set():
+                raise CaptureStopped("stopped before playback started")
             for sub in subs:
                 st = sub.status()
                 if st and st["state"] in ACTIVE_STATES:
@@ -388,8 +518,9 @@ class Capture:
             raise CaptureError("the player uses non-interleaved access, which sq-tool cannot capture")
         rate, channels = params["rate"], params["channels"]
         cap_dev = "hw:%d,%d,%d" % (card.index, 1 - play.device, play.sub)
+        # 25 ms periods: on stop, at most one short period can be left unread in the buffer.
         cmd = [self.arecord, "-D", cap_dev, "-f", params["format"], "-r", str(rate),
-               "-c", str(channels), "-t", "raw", "-B", "500000"]
+               "-c", str(channels), "-t", "raw", "-B", "500000", "-F", "25000"]
         frame_bytes = fmt.width * channels
         part = self.out_path + ".part"
         writer = WavWriter(part, rate, channels, fmt.wav_bits, fmt.is_float)
@@ -400,13 +531,19 @@ class Capture:
         self._lock = threading.RLock()  # re-entrant: the SIGINT handler may run inside it
         self.stop_reason = None  # type: Optional[str]
         self.frames = 0
+        self.params = params
+        self.state = "recording"
+        self.message = "Recording"
         self.state_log = []  # type: List[dict]
         self.player_xruns = 0
         self.seen_player = not self.prearm
         self.owner = {}  # type: dict
         self.interrupted = False
+        self._signalled = False
         stderr_lines = []  # type: List[str]
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # LC_ALL=C keeps arecord's "overrun" messages in English, which is what we look for.
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      env=dict(os.environ, LC_ALL="C"))
         proc = self._proc
 
         def on_sigint(signum, frame):
@@ -417,13 +554,15 @@ class Capture:
             for raw in proc.stderr:
                 stderr_lines.append(raw.decode(errors="replace").rstrip())
 
-        old_sigint = signal.signal(signal.SIGINT, on_sigint)
+        use_sigint = self.handle_sigint and threading.current_thread() is threading.main_thread()
+        old_sigint = signal.signal(signal.SIGINT, on_sigint) if use_sigint else None
         t_err = threading.Thread(target=read_stderr, daemon=True)
         t_mon = threading.Thread(target=self._monitor, args=(play, params), daemon=True)
         t_err.start()
         t_mon.start()
         first_sound = last_sound = None
         missed = None
+        missed_known = False
         limit = int(self.duration * rate) if self.duration else None
         pending = b""
         fd = proc.stdout.fileno()
@@ -443,10 +582,11 @@ class Capture:
                 before = writer.frames
                 writer.write(payload)
                 self.frames = writer.frames
-                if missed is None:
+                if not missed_known:
+                    missed_known = True
                     # Frames the player had already played when the capture's first data arrived.
                     hw_ptr = (play.status() or {}).get("hw_ptr")
-                    missed = max(0, hw_ptr - self.frames) if hw_ptr is not None else -1
+                    missed = max(0, hw_ptr - self.frames) if hw_ptr is not None else None
                 if np.frombuffer(payload, dtype=np.uint8).any():
                     if first_sound is None:
                         first_sound = before
@@ -462,10 +602,12 @@ class Capture:
             t_err.join(timeout=2)
             t_mon.join(timeout=2)
             writer.close()
-            signal.signal(signal.SIGINT, old_sigint)
+            if use_sigint:
+                signal.signal(signal.SIGINT, old_sigint)
+            self.state = "done"
         cpu1 = cpu_snapshot()
         player_left = self.stop_reason.startswith("the player")
-        if writer.frames == 0 or (first_sound is None and player_left and not self.prearm):
+        if writer.frames == 0 or (first_sound is None and (player_left or self.prearm)):
             os.unlink(part)
             if writer.frames == 0 and proc.returncode not in (0, None) and not player_left \
                     and not self.interrupted:
@@ -473,7 +615,7 @@ class Capture:
             if self.interrupted:
                 raise KeyboardInterrupt
             if self.prearm:
-                raise CaptureError("nothing was captured: %s" % self.stop_reason)
+                raise CaptureError("only silence was captured (%s)" % self.stop_reason)
             return None  # the player went away before sending audio: wait for it again
         os.replace(part, self.out_path)
         overruns = [l for l in stderr_lines if "overrun" in l]
@@ -514,7 +656,8 @@ class Capture:
             if self.stop_reason is None:
                 self.stop_reason = reason
             self._stop.set()
-            if self._proc.poll() is None:
+            if not self._signalled and self._proc.poll() is None:
+                self._signalled = True
                 try:
                     self._proc.send_signal(signal.SIGTERM)
                 except OSError:
@@ -538,6 +681,9 @@ class Capture:
                 self.seen_player = True
             if self.seen_player:
                 if st is None or hw is None:
+                    # The end of the stream may still sit in the capture buffer: read on for
+                    # a few periods before stopping (short, as this end holds the format).
+                    time.sleep(0.1)
                     self._request_stop("the player closed the device")
                 elif any(hw.get(k) != params.get(k) for k in ("format", "rate", "channels")):
                     self._request_stop("the player switched to %s" % describe_params(hw))

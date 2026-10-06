@@ -23,6 +23,8 @@ while i < len(args):
         i += 1
 with open(os.environ["FAKE_ARGS_LOG"], "a") as f:
     f.write(" ".join(args) + "\n")
+with open(os.environ["FAKE_ARGS_LOG"] + ".env", "a") as f:
+    f.write("LC_ALL=%s\n" % os.environ.get("LC_ALL", ""))
 expect = os.environ.get("FAKE_EXPECT")
 if expect and expect != "%s:%s:%s" % (opts.get("-f"), opts.get("-r"), opts.get("-c")):
     sys.stderr.write("arecord: set_params:1343: Sample format non available\n")

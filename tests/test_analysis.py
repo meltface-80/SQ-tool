@@ -5,6 +5,7 @@ import numpy as np
 from helpers import audio, music
 
 from sqtool.analysis import analyze_file, compare, detect_dop, fingerprint, silence_bounds
+from sqtool.report import comparison_lines
 from sqtool.generate import make_test_signal
 from sqtool.wavio import Audio
 
@@ -82,6 +83,75 @@ class ExactComparison(Fixture):
         res = compare(ref, Audio(np.vstack([PAD, src]), 48000, 32))
         self.assertEqual(res["verdict"], "IDENTICAL")
         self.assertEqual(res["exact"]["lag"], 3000)
+
+
+class ReviewRegressions(Fixture):
+    """Cases found by an independent review of the comparison."""
+
+    def test_capture_stopped_mid_track_with_silence_after(self):
+        cap = np.vstack([PAD, self.src[:int(2.5 * RATE)], np.zeros((5 * RATE, 2), np.int32)])
+        res = self.check(cap, "PARTIAL")
+        ex = res["exact"]
+        self.assertIsNone(ex["differs_from"])
+        self.assertFalse(ex["missing_end_silent"])
+        self.assertAlmostEqual(ex["identical_audio_fraction"], 1.5 / 4, places=3)
+        self.assertNotIn("approx", res)
+
+    def test_capture_stopped_with_a_fade_out(self):
+        stop = int(2.5 * RATE)
+        tail = self.src[stop:stop + 4410].astype(np.float64) * np.linspace(1, 0, 4410)[:, None]
+        cap = np.vstack([PAD, self.src[:stop], (np.round(tail / 65536) * 65536).astype(np.int32),
+                         np.zeros((RATE, 2), np.int32)])
+        res = self.check(cap, "PARTIAL")
+        self.assertEqual([e["kind"] for e in res["exact"]["events"]], ["ending"])
+        self.assertIn("playback stopped", " ".join(comparison_lines(res)))
+
+    def test_one_channel_inverted(self):
+        cap = self.src.copy()
+        cap[:, 1] = -cap[:, 1]
+        res = self.check(np.vstack([PAD, cap]), "DIFFERENT")
+        self.assertEqual(res["approx"]["lag"], 3000)
+        f = " | ".join(res["approx"]["findings"])
+        self.assertIn("polarity inverted on channel(s) 2", f)
+        self.assertIn("every sample is exact", f)
+
+    def test_repeats_are_measured(self):
+        for n in (10, 500):
+            cap = np.vstack([PAD, self.src[:2 * RATE], self.src[2 * RATE - n:2 * RATE], self.src[2 * RATE:]])
+            res = self.check(cap, "GAPS")
+            ev = res["exact"]["events"]
+            self.assertEqual([(e["kind"], e["repeated_frames"]) for e in ev], [("repeated", n)])
+            self.assertLessEqual(res["exact"]["exact_frames"], len(self.src))
+            self.assertLessEqual(res["exact"]["identical_audio_fraction"], 1.0)
+
+    def test_dropped_frames_are_not_counted_as_present(self):
+        cap = np.vstack([PAD, self.src[:2 * RATE], self.src[2 * RATE + 4410:]])
+        res = self.check(cap, "GAPS")
+        self.assertAlmostEqual(res["exact"]["identical_audio_fraction"], 1 - 0.1 / 4, places=3)
+        self.assertNotIn("100.00%", " ".join(comparison_lines(res)))
+
+    def test_silent_reference_channel_is_not_a_reordering(self):
+        src = self.src.copy()
+        src[:, 1] = 0
+        cap = np.round(src * 10 ** (-1 / 20) / 256) * 256
+        res = self.check(cap, "DIFFERENT", ref=Audio(src, RATE, 16))
+        f = " | ".join(res["approx"]["findings"])
+        self.assertNotIn("reordered", f)
+        self.assertIn("level changed: -1.000 dB", f)
+
+    def test_float_note_only_when_identical(self):
+        cap = (self.src / 2.0 ** 31).astype(np.float32)
+        cap[3 * RATE:3 * RATE + 10] += np.float32(0.25)
+        res = compare(self.ref, Audio(cap, RATE, 32, is_float=True))
+        self.assertEqual(res["verdict"], "ALTERED")
+        self.assertNotIn("floating point", " ".join(comparison_lines(res)))
+
+    def test_long_inserted_silence_near_the_end(self):
+        n = len(self.src)
+        end_music = n - RATE  # one second of trailing silence in the reference
+        cap = np.vstack([self.src[:end_music - 900], np.zeros((4603, 2), np.int32), self.src[end_music - 900:]])
+        ev = self.check(cap, "GAPS")["exact"]["events"]
+        self.assertEqual([(e["kind"], e["cap_frames"]) for e in ev], [("inserted", 4603)])
 
 
 class ApproximateComparison(Fixture):

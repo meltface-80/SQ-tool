@@ -17,5 +17,8 @@ sq-tool = "sqtool.cli:main"
 [tool.setuptools]
 packages = ["sqtool"]
 
+[tool.setuptools.package-data]
+sqtool = ["web/*"]
+
 [tool.setuptools.dynamic]
 version = {attr = "sqtool.__version__"}

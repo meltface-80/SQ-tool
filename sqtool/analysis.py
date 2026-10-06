@@ -394,8 +394,17 @@ def _relocate(ref, cap, m, lag, max_shift) -> Optional[Tuple[int, int]]:
     nr, nc = len(ref), len(cap)
     c0 = m + lag
     step = 4 * WINDOW
-    offsets = [t * step for t in range(32)] + [step * 32 * (2 ** i) for i in range(24)]
+    offsets = [t * step for t in range(32)]
+    resume = _next_sound(cap, c0 + 32 * step)
+    if resume is not None:  # after a long stretch of silence (an underrun, say), try where sound resumes
+        offsets += [resume - c0 + t * step for t in range(8)]
+    offsets += [32 * step + 2048 * t for t in range(1, 64)]  # then every 2048 frames for a while
+    offsets += [step * 32 * (2 ** i) for i in range(6, 24)]  # then further and further out
+    tried = set()
     for off in offsets:
+        if off in tried:
+            continue
+        tried.add(off)
         cs = c0 + off
         if cs >= nc:
             return None
@@ -416,10 +425,39 @@ def _relocate(ref, cap, m, lag, max_shift) -> Optional[Tuple[int, int]]:
         qw = int(pos[np.argmin(np.abs(pos - expected))])
         new_lag = ws - qw
         qlo = max(m, c0 - new_lag)
-        if qw < qlo:  # the capture went back and repeated earlier frames
-            return qw, new_lag
+        if qw < qlo:  # the capture went back and plays earlier frames again
+            qlo = max(0, c0 - new_lag)
         return _match_start(ref, cap, new_lag, qlo, qw), new_lag
     return None
+
+
+def _last_sound_end(data: np.ndarray, start: int) -> int:
+    """Index just after the last non-silent frame at or after start (start if all silent)."""
+    for a, b in reversed(list(_chunks(start, len(data)))):
+        nz = nonzero_frames(data, a, b)
+        if nz.any():
+            return a + len(nz) - int(np.argmax(nz[::-1]))
+    return start
+
+
+def _next_sound(data: np.ndarray, start: int) -> Optional[int]:
+    """Index of the first non-silent frame at or after start, or None."""
+    for a, b in _chunks(start, len(data)):
+        nz = nonzero_frames(data, a, b)
+        if nz.any():
+            return a + int(np.argmax(nz))
+    return None
+
+
+def _union_length(ranges, lo: int, hi: int) -> int:
+    """Total length of the union of [a, b) ranges, clipped to [lo, hi)."""
+    total, reach = 0, lo
+    for a, b in sorted(ranges):
+        a, b = max(a, reach), min(b, hi)
+        if b > a:
+            total += b - a
+            reach = b
+    return total
 
 
 def _diff_stats(ref, cap, rs, re_, cs, ce, is_int) -> dict:
@@ -453,6 +491,7 @@ def exact_compare(ref: np.ndarray, cap: np.ndarray, rate: int, max_shift_s: floa
     segments: List[Tuple[int, int, int]] = []
     events: List[dict] = []
     differs_from = None
+    ended_at = None
     while True:
         end = min(nr, nc - lag)
         if pos >= end:
@@ -466,7 +505,19 @@ def exact_compare(ref: np.ndarray, cap: np.ndarray, rate: int, max_shift_s: floa
             segments.append((pos, m, lag))
         found = _relocate(ref, cap, m, lag, max_shift) if len(events) < 1000 else None
         if found is None:
-            differs_from = m
+            c0 = m + lag
+            sound_end = _last_sound_end(cap, c0)
+            if sound_end - c0 <= int(2 * rate):
+                # The capture's audio stops here (playback was stopped), perhaps after a short
+                # fade: the capture ends, it does not differ.
+                ended_at = m
+                if sound_end > c0:
+                    ev = {"kind": "ending", "ref": m, "cap": c0, "ref_frames": 0,
+                          "cap_frames": sound_end - c0, "lag_before": lag, "lag_after": lag}
+                    ev.update(_diff_stats(ref, cap, m, min(nr, sound_end - lag), c0, sound_end, is_int))
+                    events.append(ev)
+            else:
+                differs_from = m
             pos = m
             break
         q, new_lag = found
@@ -475,10 +526,16 @@ def exact_compare(ref: np.ndarray, cap: np.ndarray, rate: int, max_shift_s: floa
               "lag_before": lag, "lag_after": new_lag}
         if q < m:
             ev["kind"] = "repeated"
+            ev["repeated_frames"] = new_lag - lag
         elif q - m == c1 - c0:
             ev["kind"] = "altered"
         elif q == m:
             ev["kind"] = "inserted"
+            k = c1 - c0
+            if k <= m and np.array_equal(cap[c0:c1], ref[m - k:m]) and not _is_silent(cap, c0, c1):
+                # The inserted frames are a copy of what was just played: a repeat.
+                ev["kind"] = "repeated"
+                ev["repeated_frames"] = k
         elif c1 == c0:
             ev["kind"] = "dropped"
         else:
@@ -488,25 +545,23 @@ def exact_compare(ref: np.ndarray, cap: np.ndarray, rate: int, max_shift_s: floa
         if ev["kind"] in ("altered", "replaced"):
             ev.update(_diff_stats(ref, cap, m, q, c0, c1, is_int))
         events.append(ev)
-        pos, lag = max(q, pos), new_lag
+        pos, lag = q, new_lag
     first_r, end_r = silence_bounds(ref)
-    stop = min(nr, nc - lag)  # end of the part of the reference the capture could hold
-
-    def audio_in(a: int, b: int) -> int:
-        return max(0, min(b, end_r) - max(a, first_r))
-
-    exact_audio = sum(audio_in(a, b) for a, b, _ in segments)
-    compared_audio = audio_in(start, stop)
+    # End of the part of the reference the capture could hold.
+    stop = ended_at if ended_at is not None else min(nr, nc - lag)
+    spans = [(a, b) for a, b, _ in segments]
+    compared_audio = max(0, min(stop, end_r) - max(start, first_r))
+    exact_compared = _union_length(spans, max(start, first_r), min(stop, end_r))
     result = {
         "lag": lag0,
         "segments": [{"ref_start": a, "ref_end": b, "lag": l} for a, b, l in segments],
         "events": events,
-        "exact_frames": sum(b - a for a, b, _ in segments),
+        "exact_frames": _union_length(spans, 0, nr),
         "ref_frames": nr,
-        # Share of the reference's audio (first to last non-zero sample) that the
-        # capture covers, and how much of that is bit-identical.
-        "covered_audio_fraction": compared_audio / (end_r - first_r),
-        "exact_audio_fraction": exact_audio / compared_audio if compared_audio else 0.0,
+        # Share of the reference's audio (first to last non-zero sample) that arrived
+        # bit-identical, and the same share within the part the capture could hold.
+        "identical_audio_fraction": _union_length(spans, first_r, end_r) / (end_r - first_r),
+        "exact_audio_fraction": exact_compared / compared_audio if compared_audio else 0.0,
         "missing_start": start,
         "missing_start_silent": _is_silent(ref, 0, start),
         "differs_from": differs_from,
@@ -552,23 +607,39 @@ def _coarse_lags(er: np.ndarray, ec: np.ndarray, count: int = 3) -> List[int]:
 
 
 def _fine_lag(ref: Audio, cap: Audio, rs: int, length: int, lag0: int, search: int):
-    """Correlation-maximising lag near lag0 for ref[rs:rs+length]. Returns (lag, rho)."""
+    """Correlation-maximising lag near lag0 for ref[rs:rs+length]. Returns (lag, score).
+
+    Each capture channel is matched against every reference channel and the best
+    absolute correlation counts, so inverted polarity, swapped channels or a
+    silent channel do not hide the alignment.
+    """
     cs = max(0, rs + lag0 - search)
     ce = min(cap.frames, rs + lag0 + length + search)
     if ce - cs < length or length < 16:
         return None
-    r = _rowsum(to_float(ref, rs, rs + length))
-    c = _rowsum(to_float(cap, cs, ce))
-    r_e = float((r * r).sum())
-    if r_e == 0:
+    r = to_float(ref, rs, rs + length)
+    c = to_float(cap, cs, ce)
+    r_e = (r * r).sum(axis=0)
+    if not r_e.any():
         return None
     nfft = _next_pow2(len(c) + length)
-    corr = np.fft.irfft(np.fft.rfft(c, nfft) * np.conj(np.fft.rfft(r, nfft)), nfft)[:len(c) - length + 1]
-    c2 = np.concatenate(([0.0], np.cumsum(c * c)))
+    n_out = len(c) - length + 1
+    rf = np.fft.rfft(r, nfft, axis=0)
+    cf = np.fft.rfft(c, nfft, axis=0)
+    c2 = np.concatenate((np.zeros((1, c.shape[1])), np.cumsum(c * c, axis=0)))
     win_e = c2[length:] - c2[:-length]
-    rho = corr / np.sqrt(np.maximum(win_e * r_e, 1e-300))
-    j = int(np.argmax(np.abs(rho)))
-    return cs + j - rs, float(rho[j])
+    score = np.zeros(n_out)
+    for j in range(c.shape[1]):
+        best = np.zeros(n_out)
+        for i in range(r.shape[1]):
+            if r_e[i] == 0:
+                continue
+            corr = np.fft.irfft(cf[:, j] * np.conj(rf[:, i]), nfft)[:n_out]
+            best = np.maximum(best, np.abs(corr) / np.sqrt(np.maximum(win_e[:, j] * r_e[i], 1e-300)))
+        score += best
+    score /= c.shape[1]
+    k = int(np.argmax(score))
+    return cs + k - rs, float(score[k])
 
 
 def _loud_windows(power: np.ndarray, block: int, length: int, parts: int = 3) -> List[int]:
@@ -636,12 +707,19 @@ def characterize(ref: Audio, cap: Audio, lag: int) -> dict:
         full = np.linalg.solve(rtr, rtc)
     # With identical channels (mono content) the full matrix is ill-defined: assume no mixing.
     model = full if full is not None else np.diag(diag)
-    # Capture channel j mainly carries reference channel mapping[j].
-    mapping = [int(np.argmax(np.abs(model[:, j]))) for j in range(ch)]
-    gains = [float(model[mapping[j], j]) for j in range(ch)]
+    # Capture channel j mainly carries reference channel mapping[j]. A channel with
+    # nothing in it (silent in the reference or the capture) keeps its own number.
+    mapping, gains = [], []
+    for j in range(ch):
+        col = np.abs(model[:, j])
+        i = int(np.argmax(col)) if col.max() > 0 else j
+        mapping.append(i)
+        gains.append(float(model[i, j]) if col.max() > 0 else None)
     out["channel_map"] = mapping
+    out["model"] = model.tolist()
     out["gain_db"] = [db_amp(abs(g)) if g else None for g in gains]
-    out["polarity_inverted"] = [bool(g < 0) for g in gains]
+    out["polarity_inverted"] = [bool(g is not None and g < 0) for g in gains]
+    out["silent_channels"] = [j for j in range(ch) if gains[j] is None and rtr[j, j] > 0]
     if full is not None:
         out["matrix"] = full.tolist()
         leaks = [abs(full[i, j]) / abs(gains[j]) for j in range(ch) for i in range(ch)
@@ -777,6 +855,8 @@ def describe_residual(ch: dict, out_bits: Optional[int], ref_bits: Optional[int]
             notes.append("channels are reordered (capture channel %s carries reference channel %s)"
                          % (", ".join(str(j + 1) for j in range(len(mapping))),
                             ", ".join(str(i + 1) for i in mapping)))
+    for j in ch.get("silent_channels", []):
+        notes.append("capture channel %d is silent, though the reference has audio there" % (j + 1))
     gains = [g for g in ch.get("gain_db", []) if g is not None]
     if gains and max(abs(g) for g in gains) > 0.0005:
         notes.append("level changed: " + ", ".join(
@@ -906,9 +986,9 @@ def compare(ref: Audio, cap: Audio) -> dict:
 
 def _exact_verdict(exact: dict) -> str:
     kinds = {e["kind"] for e in exact["events"]}
-    if exact["differs_from"] is not None or kinds & {"altered", "replaced", "repeated"}:
+    if exact["differs_from"] is not None or kinds & {"altered", "replaced"}:
         return "ALTERED"
-    if kinds:
+    if kinds & {"inserted", "dropped", "repeated"}:
         return "GAPS"
     if ((exact["missing_start"] and not exact["missing_start_silent"])
             or (exact["missing_end"] and not exact["missing_end_silent"])):

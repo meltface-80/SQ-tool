@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>SQ-tool</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 16h4l3-9 5 18 4-14 3 5h7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div>
+      <h1>SQ-tool</h1>
+      <p class="tagline">What does your DAC really receive?</p>
+    </div>
+  </div>
+  <span id="rec-badge" class="live" hidden>REC</span>
+</header>
+<nav class="tabs" role="tablist">
+  <button role="tab" data-view="capture" aria-selected="true">Capture</button>
+  <button role="tab" data-view="library" aria-selected="false">Library <span id="count" class="count"></span></button>
+  <button role="tab" data-view="compare" aria-selected="false">Compare <span id="selcount" class="count"></span></button>
+</nav>
+<main>
+  <section id="view-capture" class="view"></section>
+  <section id="view-library" class="view" hidden></section>
+  <section id="view-compare" class="view" hidden></section>
+</main>
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-backdrop" data-close></div>
+  <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-head"><button class="sheet-close" data-close aria-label="Close">&times;</button></div>
+    <div id="sheet-body"></div>
+  </div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
