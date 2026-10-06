@@ -213,16 +213,123 @@ def _is_wav(path: str) -> bool:
     return len(head) == 12 and head[:4] in (b"RIFF", b"RF64", b"BW64") and head[8:12] == b"WAVE"
 
 
+def _skip_id3(f) -> bytes:
+    """Skip an ID3v2 tag that some taggers put before a FLAC stream; returns the next 4 bytes."""
+    head = f.read(10)
+    if head[:3] == b"ID3" and len(head) == 10:
+        size = (head[6] & 0x7F) << 21 | (head[7] & 0x7F) << 14 | (head[8] & 0x7F) << 7 | (head[9] & 0x7F)
+        f.seek(10 + size + (10 if head[5] & 0x10 else 0))
+        return f.read(4)
+    f.seek(4)
+    return head[:4]
+
+
+def _is_aiff(path: str) -> bool:
+    with open(path, "rb") as f:
+        head = f.read(12)
+    return len(head) == 12 and head[:4] == b"FORM" and head[8:12] in (b"AIFF", b"AIFC")
+
+
+def _extended_to_float(b: bytes) -> float:
+    """80-bit IEEE extended (AIFF sample rate) to float."""
+    exp = struct.unpack(">H", b[:2])[0]
+    mant = struct.unpack(">Q", b[2:10])[0]
+    sign = -1.0 if exp & 0x8000 else 1.0
+    exp &= 0x7FFF
+    return 0.0 if exp == 0 and mant == 0 else sign * mant * 2.0 ** (exp - 16383 - 63)
+
+
+def read_aiff(path: str) -> Audio:
+    """AIFF / AIFF-C (uncompressed big- or little-endian PCM)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    kind = data[8:12]
+    pos, comm, ssnd = 12, None, None
+    while pos + 8 <= len(data):
+        cid, size = struct.unpack(">4sI", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + size]
+        if cid == b"COMM":
+            comm = body
+        elif cid == b"SSND":
+            ssnd = body
+        pos += 8 + size + (size & 1)
+    if comm is None or ssnd is None:
+        raise AudioFileError("%s: not a valid AIFF file" % path)
+    channels, frames, bits = struct.unpack(">hIh", comm[:8])
+    rate = int(round(_extended_to_float(comm[8:18])))
+    little = kind == b"AIFC" and comm[18:22] == b"sowt"
+    if kind == b"AIFC" and comm[18:22] not in (b"NONE", b"twos", b"sowt"):
+        raise AudioFileError("%s: compressed AIFF-C (%s) is not supported" % (path, comm[18:22].decode(errors="replace")))
+    offset = struct.unpack(">I", ssnd[:4])[0]
+    width = (bits + 7) // 8
+    raw = ssnd[8 + offset:8 + offset + frames * channels * width]
+    raw = raw[:len(raw) - len(raw) % (width * channels)]
+    b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, width)
+    if not little:
+        b = b[:, ::-1]  # to little-endian byte order
+    words = np.zeros((b.shape[0], 4), dtype=np.uint8)
+    words[:, 4 - width:] = b
+    data_ = words.view("<i4").reshape(-1, channels).astype(np.int32)
+    label = "AIFF %d-bit" % bits
+    return Audio(data=data_, rate=rate, bits=bits, label=label, path=path)
+
+
+def read_tags(path: str) -> Dict[str, str]:
+    """Artist/title/album from FLAC Vorbis comments or WAV LIST/INFO, if present."""
+    tags: Dict[str, str] = {}
+    try:
+        with open(path, "rb") as f:
+            head = _skip_id3(f)
+            if head == b"fLaC":
+                while True:
+                    hdr = f.read(4)
+                    if len(hdr) < 4:
+                        break
+                    last, btype = hdr[0] & 0x80, hdr[0] & 0x7F
+                    size = int.from_bytes(hdr[1:4], "big")
+                    block = f.read(size)
+                    if btype == 4:  # VORBIS_COMMENT
+                        n = struct.unpack("<I", block[:4])[0]
+                        p = 4 + n
+                        count = struct.unpack("<I", block[p:p + 4])[0]
+                        p += 4
+                        for _ in range(count):
+                            ln = struct.unpack("<I", block[p:p + 4])[0]
+                            key, _, value = block[p + 4:p + 4 + ln].decode("utf-8", "replace").partition("=")
+                            tags.setdefault(key.lower(), value)
+                            p += 4 + ln
+                    if last:
+                        break
+            elif head == b"RIFF":
+                f.seek(0)
+                data = f.read(1 << 20)
+                i = data.find(b"LIST")
+                if i >= 0 and data[i + 8:i + 12] == b"INFO":
+                    size = struct.unpack("<I", data[i + 4:i + 8])[0]
+                    p, end = i + 12, i + 8 + size
+                    names = {b"INAM": "title", b"IART": "artist", b"IPRD": "album"}
+                    while p + 8 <= min(end, len(data)):
+                        cid, ln = struct.unpack("<4sI", data[p:p + 8])
+                        if cid in names:
+                            tags[names[cid]] = data[p + 8:p + 8 + ln].rstrip(b"\0").decode("utf-8", "replace")
+                        p += 8 + ln + (ln & 1)
+    except (OSError, struct.error):
+        pass
+    return {k: v for k, v in tags.items() if k in ("artist", "title", "album")}
+
+
 def load_audio(path: str) -> Audio:
     """Load any audio file: WAV natively, everything else through ffmpeg (or flac)."""
     if not os.path.isfile(path):
         raise AudioFileError("no such file: %s" % path)
     if _is_wav(path):
         return read_wav(path)
+    if _is_aiff(path):
+        return read_aiff(path)
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         return _load_with_ffmpeg(path)
     with open(path, "rb") as f:
-        is_flac = f.read(4) == b"fLaC"
+        is_flac = _skip_id3(f) == b"fLaC"
     if is_flac and shutil.which("flac"):
         out = subprocess.run(["flac", "-d", "-c", "-s", "--", path], stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, check=False)
@@ -233,7 +340,7 @@ def load_audio(path: str) -> Audio:
         audio.label = "FLAC %d-bit" % audio.bits
         return audio
     raise AudioFileError(
-        "%s is not a WAV file; install ffmpeg (or flac for .flac files) so it can be decoded"
+        "%s: SQ-tool reads FLAC, WAV and AIFF files; other formats need ffmpeg installed"
         % path)
 
 

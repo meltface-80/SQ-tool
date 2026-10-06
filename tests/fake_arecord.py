@@ -2,10 +2,10 @@
 """Stand-in for arecord on a simulated snd-aloop card (used by the tests only).
 
 Streams the bytes in $FAKE_PCM (what the "player" sent, already in the ALSA
-format; a list of files plays one per run) to stdout, skipping $FAKE_SKIP_BYTES at the start like a capture that
-began late. When the data runs out it marks the player's /proc entries closed
-($FAKE_CLOSE_DIR) and keeps sending silence, as the real loopback does, until
-it is stopped with SIGTERM or SIGINT.
+format; a list of files plays one per run) to stdout, skipping $FAKE_SKIP_BYTES
+at the start like a capture that began late. When the data runs out it marks
+the player's /proc entries closed ($FAKE_CLOSE_DIR) and keeps sending silence,
+as the real loopback does, until it is stopped with SIGTERM or SIGINT.
 """
 import os
 import signal
@@ -50,6 +50,9 @@ with open(runs[min(run, len(runs) - 1)], "rb") as f:
     data = f.read()[int(os.environ.get("FAKE_SKIP_BYTES", "0")):]
 frame = int(os.environ["FAKE_FRAME_BYTES"])
 chunk = frame * 4096
+# $FAKE_SPEED: play this many times faster than real time (0: as fast as possible).
+speed = float(os.environ.get("FAKE_SPEED") or 0)
+pause = 4096.0 / int(opts.get("-r", "44100")) / speed if speed > 0 else 0.001
 overrun_at = int(os.environ.get("FAKE_OVERRUN_AT", "-1"))
 out = sys.stdout.buffer
 sys.stderr.write("Recording raw data 'stdin' : simulated\n")
@@ -64,7 +67,7 @@ try:
             sys.stderr.write("overrun!!! (at least 2.000 ms long)\n")
             sys.stderr.flush()
             overrun_at = -1
-        time.sleep(0.001)
+        time.sleep(pause)
     close_dir = os.environ.get("FAKE_CLOSE_DIR")
     if close_dir and not stop:
         for name in ("hw_params", "status"):

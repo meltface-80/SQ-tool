@@ -15,7 +15,7 @@ Capture exactly what audio players send to a DAC and compare it, sample by
 sample, with the source file or with another player's capture.
 
 The web interface (what the Docker image runs):
-  sq-tool serve --data ./sq-data         then open http://<this machine>:3400
+  sq-tool serve --music ~/Music          then open http://<this machine>:3400
 
 From the command line:
   sq-tool status                         sound cards and what they are being sent
@@ -50,7 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     w = sub.add_parser("serve", help="run the web interface (port 3400)")
     w.add_argument("--data", default=os.environ.get("SQTOOL_DATA", "sq-data"),
-                   help="folder for captures, analyses and test tracks (default: ./sq-data)")
+                   help="folder for tests: recordings, analyses and charts (default: ./sq-data)")
+    w.add_argument("--music", default=os.environ.get("SQTOOL_MUSIC", "/music"),
+                   help="your music folder, to pick songs from (default: /music)")
+    w.add_argument("--load-loopback", action="store_true",
+                   default=os.environ.get("SQTOOL_LOAD_LOOPBACK", "") not in ("", "0"),
+                   help="load the snd-aloop driver at start if there is no Loopback card (needs root)")
     w.add_argument("--host", default="0.0.0.0", help="address to listen on (default: all)")
     w.add_argument("--port", type=int, default=int(os.environ.get("PORT", "3400")),
                    help="port (default 3400)")
@@ -92,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _write_json(path: str, data) -> None:
-    from .library import clean
+    from .sessions import clean
     with open(path, "w") as f:
         json.dump(clean(data), f, indent=2)
     print("Results written to %s" % path)
@@ -120,7 +125,7 @@ def cmd_gen(args) -> int:
 
 def cmd_serve(args) -> int:
     from .server import serve
-    serve(args.data, args.host, args.port)
+    serve(args.data, args.music, args.host, args.port, load_driver=args.load_loopback)
     return 0
 
 

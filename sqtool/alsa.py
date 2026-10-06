@@ -301,6 +301,35 @@ def process_info(pid: Optional[int]) -> dict:
     return {"pid": pid, "name": comm or "?", "cmdline": cmdline}
 
 
+def kernel_modules_dir() -> str:
+    return os.path.join(os.environ.get("SQTOOL_MODULES", "/lib/modules"), os.uname().release)
+
+
+def load_loopback(timeout: float = 20.0) -> Tuple[bool, str]:
+    """Load the snd-aloop driver (needs root and the host's kernel modules): (success, message)."""
+    if find_loopback(list_cards()):
+        return True, "the Loopback card is already there"
+    modprobe = shutil.which("modprobe")
+    if not modprobe:
+        return False, "modprobe is not installed here"
+    if not os.path.isdir(kernel_modules_dir()):
+        return False, ("this kernel's modules (%s) are not visible here: start the container with "
+                       "-v /lib/modules:/lib/modules:ro" % kernel_modules_dir())
+    try:
+        # index=-2: any free card number except 0, so the loopback never becomes the default card.
+        r = subprocess.run([modprobe, "snd-aloop", "index=-2"], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, "modprobe failed: %s" % exc
+    if r.returncode != 0:
+        return False, "modprobe snd-aloop failed: %s" % (r.stdout.decode(errors="replace").strip() or r.returncode)
+    for _ in range(50):
+        if find_loopback(list_cards()):
+            return True, "loaded the snd-aloop driver"
+        time.sleep(0.1)
+    return False, "modprobe snd-aloop ran, but no Loopback card appeared"
+
+
 def describe_params(hw: dict) -> str:
     rate = hw["rate"]
     text = "%s, %d Hz, %d ch" % (hw["format"], rate, hw["channels"])
@@ -408,8 +437,10 @@ class Capture:
                  silence_stop: float = 5.0, wait: Optional[float] = None,
                  prearm: Optional[Tuple[str, int, int]] = None, device: Optional[int] = None,
                  subdevice: Optional[int] = None, arecord: str = "arecord", poll: float = 0.01,
-                 log: Callable[[str], None] = print, handle_sigint: bool = True):
+                 log: Callable[[str], None] = print, handle_sigint: bool = True,
+                 stop_after_audio: Optional[float] = None):
         self.out_path = out_path
+        self.stop_after_audio = stop_after_audio  # seconds after the music starts (the song's length)
         self.card_want = card
         self.duration = duration
         self.silence_stop = silence_stop
@@ -596,11 +627,16 @@ class Capture:
                 if (self.silence_stop and last_sound is not None
                         and self.frames - last_sound >= self.silence_stop * rate):
                     self._request_stop("%g s of digital silence after the music" % self.silence_stop)
+                if (self.stop_after_audio and first_sound is not None
+                        and self.frames - first_sound >= self.stop_after_audio * rate):
+                    self._request_stop("reached the end of the song")
         finally:
             self._request_stop("arecord exited")
             proc.wait()
             t_err.join(timeout=2)
             t_mon.join(timeout=2)
+            proc.stdout.close()
+            proc.stderr.close()
             writer.close()
             if use_sigint:
                 signal.signal(signal.SIGINT, old_sigint)

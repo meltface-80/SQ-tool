@@ -212,6 +212,7 @@ class Take:
     iso_errors: int = 0
     dropped: int = 0
     has_audio: bool = False
+    first_audio_frame: Optional[int] = None
     interruptions: List[dict] = field(default_factory=list)
     first_ts: Optional[float] = None
     last_ts: Optional[float] = None
@@ -223,8 +224,10 @@ class UsbCapture:
 
     def __init__(self, dac: UsbAudio, out_dir: str, name: str = "capture", idle_stop: float = 5.0,
                  max_seconds: Optional[float] = None, on_take: Optional[Callable[[str, dict], None]] = None,
-                 log: Callable[[str], None] = print, source=None, gap: float = 0.25):
+                 log: Callable[[str], None] = print, source=None, gap: float = 0.25,
+                 stop_after_audio: Optional[float] = None):
         self.dac = dac
+        self.stop_after_audio = stop_after_audio  # seconds after the music starts (the song's length)
         self.out_dir = out_dir
         self.name = name
         self.idle_stop = idle_stop
@@ -343,8 +346,12 @@ class UsbCapture:
         if self.idle_stop and self._last_sound is not None:
             if time.monotonic() - self._last_sound >= self.idle_stop:
                 self.stop("playback ended (%g s without music)" % self.idle_stop)
-        if self.max_seconds and self.take and self.take.frames >= self.max_seconds * self.take.params["rate"]:
+        take = self.take
+        if self.max_seconds and take and take.frames >= self.max_seconds * take.params["rate"]:
             self.stop("reached the maximum length")
+        if (self.stop_after_audio and take and take.first_audio_frame is not None
+                and take.frames - take.first_audio_frame >= self.stop_after_audio * take.params["rate"]):
+            self.stop("reached the end of the song")
 
     def _account_dropped(self, n: int) -> None:
         if n:
@@ -411,6 +418,8 @@ class UsbCapture:
         take.writer.write(take.convert(raw) if take.convert else raw)
         take.frames += usable // take.stride
         if np.frombuffer(raw, dtype=np.uint8).any():
+            if take.first_audio_frame is None:
+                take.first_audio_frame = take.frames - usable // take.stride
             take.has_audio = True
             self._last_sound = time.monotonic()
         if self.state != "recording":

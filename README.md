@@ -1,101 +1,74 @@
 # SQ-tool
 
-**SQ-tool records exactly what your music player sends to your DAC, and shows
-whether two players send the same thing.**
+**Is your music player bit-perfect? SQ-tool records exactly what Roon, Mandarin
+or any other player sends to its output, and compares it sample by sample with
+the original file and with each other.**
 
-It runs in Docker on the computer the DAC is plugged into. You use it from a
-phone or tablet at `http://<server>:3400`:
+It runs in Docker on the computer your players run on. You use it from a phone
+or tablet at `http://<server>:3400`:
 
-1. **Capture.** Press *Start*, then play a track in Roon, Mandarin or any other
-   player, to your USB DAC as usual. SQ-tool records the USB audio packets on
-   their way to the DAC. You don't need to change anything in the players.
-2. **Library.** Every capture is saved and analysed:
-   * format and sample rate;
-   * how many bits are really used;
-   * levels and silence;
-   * a fingerprint of the sample data;
-   * which program sent it;
-   * USB statistics and CPU load.
-3. **Compare.** Pick two or more captures (and the original file, if you like)
-   to see them side by side. Each pair is **nulled**: aligned sample by sample
-   and subtracted. Identical data leaves nothing behind. If the data differs,
-   SQ-tool says how:
-   * level;
-   * dither or rounding;
-   * frequency response;
-   * channel mixing;
-   * dropouts, or audio that stopped and restarted.
-
-   You can also download the difference as a WAV file and listen to it.
+1. **Choose a song** from your music folder, for example a Qobuz download.
+   SQ-tool reads and analyses the file.
+2. **Record Roon.** Press *Record*, then play the song in Roon to the
+   **Loopback** output. SQ-tool records every sample Roon sends.
+3. **Record Mandarin** the same way.
+4. **Read the results.**
+   * Is Roon bit-perfect? Is Mandarin? In other words, is every sample they
+     send identical to the file?
+   * Do both send the same data? That is, would your DAC convert exactly the
+     same numbers from both?
+   * Detailed, zoomable **spectrograms**: the file, what each player sent, and
+     the differences between them.
+   * **Charts**: spectrum, level over time, what remains after matching levels,
+     a sample-by-sample close-up of the waveforms, and bit usage.
+   * **Details** of each: format, bits in use, peak, loudness, a fingerprint of
+     the sample data, the player's buffer sizes, and CPU load.
+   * **Downloads**: each recording, and the differences as WAV files.
 
 ```
-Roon / Mandarin ──► ALSA ──► USB audio driver ──► USB cable ──► SMSL SU-1
-                                                     │
-                                         usbmon (kernel USB monitor)
-                                                     │
-                                                SQ-tool :3400 ──► your tablet
+song.flac ──► Roon ──────┐
+                         ├──► Loopback (a virtual sound card) ──► SQ-tool ──► :3400 on your tablet
+song.flac ──► Mandarin ──┘
 ```
-
-## What it can and cannot tell you
-
-SQ-tool sees the exact bytes in every USB audio packet sent to the DAC. With
-those it shows:
-
-* whether two players deliver **bit-identical** audio;
-* **how** the data differs when it does: volume, leveling, headroom, dither,
-  resampling, EQ, crossfeed, polarity, channel swaps;
-* whether the stream had **interruptions**: underruns, or playback that stopped
-  and restarted;
-* how each player uses ALSA: sample format, period and buffer sizes;
-* how busy the computer was while playing.
-
-It **cannot** measure what happens electrically: jitter on the cable, noise
-coupled through USB or ground, or the DAC's own behaviour.
-
-If two players produce identical captures, the DAC received the same data from
-both. Any audible difference then comes from somewhere else: electrical or
-system-load effects, or the listening test itself. Level-matched blind
-listening is the way to check that.
 
 ## Install
 
-You need a Linux machine with Docker, and the USB DAC plugged into it.
-
-**1. Load the kernel's USB monitor** (once, on the host):
-
-```sh
-sudo modprobe usbmon
-echo usbmon | sudo tee /etc/modules-load.d/usbmon.conf   # also load it at every boot
-```
-
-**2. Start SQ-tool:**
+You need the Linux computer that runs Roon Server and Mandarin, with Docker,
+and your music folder on it. Run:
 
 ```sh
 docker run -d --name sq-tool --restart unless-stopped \
   --privileged --pid=host \
-  -p 3400:3400 \
+  -v /dev/snd:/dev/snd \
+  -v /lib/modules:/lib/modules:ro \
+  -v /path/to/your/music:/music:ro \
   -v sq-tool-data:/data \
+  -p 3400:3400 \
   ghcr.io/meltface-80/sq-tool:latest
 ```
 
-**3. Open `http://<server-address>:3400`** on your phone or tablet, for
+Replace `/path/to/your/music` with your music folder, the one Roon and Mandarin
+play from. Then open `http://<server-address>:3400` on your phone or tablet, for
 example `http://192.168.1.20:3400`.
 
 What the options do:
 
 | Option | Why |
 |---|---|
-| `--privileged` | lets it read the USB monitor (`/dev/usbmon*`) and the sound cards' status (`/proc/asound`), which Docker normally hides |
-| `--pid=host` | lets it name the program sending the audio (RAATServer, mandarin, …) and measure CPU use |
+| `--privileged` | lets SQ-tool see the sound cards (`/proc/asound`) and load the Loopback driver |
+| `--pid=host` | shows which program sent the audio (RAATServer, mandarin, …) |
+| `-v /dev/snd:/dev/snd` | the sound devices, including the Loopback card once it is loaded |
+| `-v /lib/modules:/lib/modules:ro` | your kernel's drivers, so SQ-tool can load the Loopback driver (`snd-aloop`) itself |
+| `-v /path/to/your/music:/music:ro` | your music, read-only, to choose the song from |
+| `-v sq-tool-data:/data` | keeps your tests when the container is updated |
 | `-p 3400:3400` | the web page |
-| `-v sq-tool-data:/data` | keeps your captures when the container is updated or restarted |
 
-**Test tracks in your music library (optional).** SQ-tool can generate test
-tracks: 16/44.1, 24/44.1, 24/96 and 24/192. To have them appear in Roon's and
-Mandarin's libraries by themselves, add this option to the command above:
+**The Loopback card.** SQ-tool loads it when it starts, and there is a button
+for it on the page. The first time it appears, **restart Roon Server** so Roon
+lists the new output. To load it at every boot, before Roon starts:
 
 ```sh
--v /path/to/your/music/sq-test:/data/test-tracks
+echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
 ```
 
 **Updating:**
@@ -106,10 +79,17 @@ docker rm -f sq-tool
 # then run the docker run command again
 ```
 
-Your captures stay in the `sq-tool-data` volume.
+Your tests stay in the `sq-tool-data` volume.
 
-**Building the image yourself.** The image is published from the `main`
-branch. To build it from a branch, or if you prefer to build your own:
+**The image.** GitHub builds it on every push:
+
+* `:latest` comes from the `main` branch.
+* Each other branch gets its own tag, named after the branch with `/` turned
+  into `-`.
+
+If `docker pull` asks you to log in, the package isn't public yet. Make it
+public once: on GitHub, go to *Your profile → Packages → sq-tool → Package
+settings → Change visibility → Public*. Or build the image yourself:
 
 ```sh
 docker build -t sq-tool https://github.com/meltface-80/SQ-tool.git#main
@@ -118,155 +98,165 @@ docker build -t sq-tool https://github.com/meltface-80/SQ-tool.git#main
 Then use `sq-tool` instead of `ghcr.io/meltface-80/sq-tool:latest` in the run
 command.
 
-If `docker pull` asks you to log in, the package isn't public yet. Make it
-public once: on GitHub, go to *Your profile → Packages → sq-tool → Package
-settings → Change visibility → Public*.
+## Setting up the players
+
+**Roon**
+
+1. Open *Settings → Audio*. Under your Roon Server, find **Loopback** and press
+   **Enable**. If it's listed twice, either one works. Name the zone, for
+   example "SQ-tool".
+2. In that zone's *Device Setup*, use the same settings as your DAC's zone, so
+   the test shows what your DAC gets.
+   * For a pure bit-perfect check, set *Volume control* to **Fixed volume**.
+   * Turn off everything in the zone's *DSP Engine*: volume leveling, headroom
+     management, sample rate conversion, EQ, crossfeed, convolution.
+3. When testing, play the song to that zone.
+
+**Mandarin** (or any other player): choose the output device **Loopback**
+(`hw:Loopback,0`, or `hw:N,0` with the card number the page shows), the same
+way you would choose your DAC.
 
 ## Using it
 
-### Capture
+* **Start a new test** and pick the song: browse your music folder, search it,
+  or upload the file from your phone or tablet. SQ-tool reads FLAC, WAV and
+  AIFF files.
+* Press **Record Roon**. SQ-tool waits for playback on the Loopback card. Then
+  play the song in Roon, from the beginning. Recording starts when Roon starts
+  sending audio, and stops by itself:
+  * at the end of the song;
+  * when Roon closes the output;
+  * or after 5 seconds of digital silence (this can be changed in Settings).
 
-1. Pick the DAC in *1. Output device*. It shows what is playing right now:
-   format, rate and sending program.
-2. Give the capture a name, for example *Roon – Track 3*, and press
-   **Start capture**.
-3. Play the track to the DAC from the player. SQ-tool records it, and saves it
-   when the music has stopped for 5 seconds (you can change that). You can
-   also press **Stop**.
-4. Repeat with the other player and the same track.
+  You can also press **Stop now**.
+* Press **Record Mandarin** and do the same.
+* **Results** appear as soon as each recording is analysed: one card for each
+  player against the file, and one for the two players against each other.
+* **Record again** replaces a player's recording, for example after you change
+  a setting in Roon.
+* The player names can be changed in Settings (for new tests) or with **⋯** on
+  a test. **⋯** also deletes a test.
 
-If the player changes sample rate between tracks, each format becomes a
-separate capture.
+### The spectrograms
 
-### Library
+There is one picture per recording, all lined up on the song's timeline and on
+one colour scale, from black (the lowest level, −150 dB by default) to pale
+yellow (0 dB, full scale).
 
-Captures are listed newest first. The coloured square is a fingerprint of the
-sample data, so **the same colour means identical audio data**, whatever the
-container.
+* **What each one sent** shows the file, Roon and Mandarin. If they are
+  identical, the pictures are identical.
+* **Differences** shows what is left when one recording is subtracted from the
+  other, sample by sample: Roon − file, Mandarin − file and Mandarin − Roon.
+  **Black means no difference at all.**
+  * **Match levels first** removes a plain volume difference before
+    subtracting. It shows what else changed, such as dither or EQ.
+* **Drag** across the pictures to zoom into that part of the song, down to a
+  few milliseconds. Use the buttons to zoom out, move, or go back to the whole
+  song.
+* **Tap** (or hover with a mouse) to read the time and frequency.
+* **Log / Linear** sets the frequency scale, and the menu sets the lowest level
+  shown. Lower it (−180 or −210 dB) to see dither at 24 bits.
+* Each column of pixels covers its whole stretch of time: SQ-tool analyses
+  every part of it and shows the loudest value, so a short click can't fall
+  between pixels.
+  * Some differences are far below the colour scale, such as one sample off
+    by its last bit. The verdict and the timeline under it still catch them.
 
-* **Import source file** adds an original file (WAV or FLAC) as a reference.
-* **Test tracks** creates the test signals and adds them to the library as
-  references.
-
-Tap an item for its full analysis and charts. From there you can download the
-captured audio as WAV, rename it, add notes, or delete it.
-
-### Compare
-
-Tick two or more items and press **Compare**. You get:
-
-* **Side by side**: one column per capture. Cells that differ from the first
-  column are highlighted.
-* **Null tests** for every pair:
-  * the verdict, with a plain-language explanation;
-  * a timeline of where the data matches;
-  * how the difference behaves over time and frequency;
-  * a **difference file** to download.
-* **Bit usage**: how often each bit of the sample word is set. Padding shows as
-  empty bits; dither fills the low bits.
-* **Spectrum** and **level over time** of each capture, overlaid.
-
-## Getting a fair comparison
-
-* Play **the same track** from both players, to **the same DAC**.
-* Compare format and sample rate first, in the side-by-side table. If the
-  players send different formats, the data cannot be identical.
-* For a bit-perfect baseline in Roon:
-  * set the zone's volume to *Fixed*, or to the DAC's own (device) volume;
-  * turn off everything in its DSP engine: volume leveling, headroom
-    management, sample rate conversion, EQ, crossfeed, convolution.
-
-  Then switch features on one at a time to see exactly what each does to the
-  data.
-* Capture the same player twice. The two captures should be identical to each
-  other: that shows the measurement itself is consistent.
-* If the levels differ, even by a few tenths of a dB, that alone can make one
-  player sound "better" in a sighted comparison.
-
-## Reading the verdicts
+## Reading the results
 
 | Verdict | Meaning |
 |---|---|
-| **BIT-PERFECT / IDENTICAL** | Every sample matches. Silence before and after is allowed, and so is padding: 16-bit samples sent in a 32-bit container keep the same values. |
-| **BIT-PERFECT WHERE CAPTURED** | Everything captured matches, but part of the track is missing, e.g. playback was stopped early. |
-| **SAME SAMPLES, WITH INTERRUPTIONS** | The data matches, but the stream has gaps: inserted silence (an underrun), lost samples, or repeated audio. |
-| **ALTERED** | Most of the stream matches; the listed places differ. |
-| **NOT BIT-PERFECT / DIFFERENT** | The samples differ throughout; the findings say how. |
-| **RESAMPLED / CHANNELS** | The sample rate or the channel count differs. |
+| **BIT-PERFECT** | Every sample the player sent equals the sample in the file. Silence before and after the song is allowed, and so is a bigger container: 16-bit samples sent as 32-bit words keep their values. |
+| **BIT-PERFECT** with part of the song missing | Every recorded sample matches, but part of the song isn't in the recording, for example because playback was stopped early. |
+| **DROPOUTS** | The samples are unchanged, but the stream has gaps or jumps: silence inserted (an underrun), samples lost, or audio repeated. |
+| **ALTERED** | Most of the stream matches the file; some parts differ. |
+| **NOT BIT-PERFECT** | The samples differ throughout. SQ-tool says how: a level change, dither, rounding, EQ, channel changes. |
+| **RESAMPLED** | The player sent a different sample rate from the file's. |
+| **SAME DATA / DIFFERENT DATA** | Roon against Mandarin: whether your DAC would convert exactly the same numbers from both. |
 
-For a null test that does not cancel, the numbers mean:
+For a player that is not bit-perfect, the numbers mean:
 
-* **difference … dB below the music**: how deep the null is. Rounding or dither
-  at 24 bits leaves the difference roughly 130–140 dB below typical music.
-* **level changed**: the volume difference.
-* **remaining difference … dBFS**: what is left once that level difference is
-  removed. It is typically:
-  * dither, about 0.5 LSB;
-  * plain rounding, about 0.29 LSB;
-  * or a sign of heavier processing.
+* **level**: the volume difference, for example −0.50 dB.
+* **what remains after matching the level**: how far below the music the rest
+  of the difference lies, and its level in dBFS rms. It is typically one of
+  these:
+  * dither: about −144 dBFS at 24 bits, or −96 dBFS at 16 bits;
+  * plain rounding: about −149 dBFS at 24 bits, or −101 dBFS at 16 bits;
+  * or, if higher, a sign of heavier processing.
 
-## How it works
+## What it can and cannot tell you
 
-Linux's USB audio driver (`snd-usb-audio`) copies the samples the player
-writes into USB packets unchanged. With `usbmon`, the kernel's USB packet
-monitor, SQ-tool reads every packet sent to the DAC's audio endpoint and joins
-them back into the sample stream. This is passive: it cannot change what the
-player or the DAC does.
+* The Loopback card receives exactly the samples a player sends to an ALSA
+  output. If the Loopback zone has the same settings as your DAC's zone, those
+  are the samples your DAC gets.
+* A player may package the same samples differently for different devices:
+  16-bit samples in 32-bit words, say, or packed 24-bit. SQ-tool compares the
+  sample values, so the same values in another container count as identical.
+  The *Details* table shows each format.
+* It cannot measure what happens electrically: jitter, noise on the USB cable
+  or ground, or the DAC's own behaviour.
 
-Along the way it records:
+If both players send identical data, your DAC converts the same numbers from
+both. Any audible difference then comes from somewhere else: electrical or
+system-load effects, or the listening test itself. Level-matched blind
+listening is the way to check that. Even a few tenths of a dB of level
+difference can make one player sound "better" in a sighted comparison.
 
-* the stream format, from `/proc/asound`;
-* the sample rate the host set on the DAC;
-* how many frames each USB packet carried;
-* packet errors;
-* when the stream stopped and restarted.
-
-Comparisons first look for a bit-exact alignment and follow it through the
-whole file. Every place where it breaks is classified as an insertion, a drop,
-a repeat or an alteration. If there is no exact match at all, the files are
-aligned by correlation instead. The capture is then fitted to the reference
-with a gain and channel matrix, and SQ-tool analyses what remains.
-
-## Command line
-
-The same code also runs without Docker:
+**Recording the USB DAC itself.** With a USB DAC, SQ-tool can also record the
+USB packets on their way to the DAC (Linux's `usbmon`), instead of the Loopback
+card. Choose your DAC in *Settings → Record from*, and load usbmon on the
+server first:
 
 ```sh
-sudo apt install python3-numpy flac      # Debian/Ubuntu; Python 3.8+
-./sq-tool status                         # sound cards and what they are being sent right now
-sudo ./sq-tool capture --usb roon.wav    # record what the USB DAC receives
-./sq-tool compare source.flac roon.wav mandarin.wav
-./sq-tool analyze roon.wav
-./sq-tool serve --data ./sq-data         # the web interface, as in Docker
+sudo modprobe usbmon
 ```
 
-There is also a second capture method that needs no USB DAC: the ALSA loopback
-card (`sudo modprobe snd-aloop`). The player plays to `hw:Loopback,0` and
-SQ-tool records the other end. It also appears in the web interface's device
-list. Prefer the USB method when you have a USB DAC, because the player then
-sees the real device.
+The players then play to the DAC as usual.
+
+## Getting a fair comparison
+
+* Play the same file in both players, from the beginning.
+* Record the same player twice. The two recordings should be identical, which
+  shows the measurement itself is consistent.
+* Recording starts a moment after the player starts. Most songs begin with
+  digital silence, so nothing is lost. If a song starts with sound right away,
+  its first few milliseconds may be missing. The verdict then says so, and
+  everything recorded is still compared.
 
 ## Troubleshooting
 
-* **"usbmon is not loaded"**: run `sudo modprobe usbmon` on the host. The
-  container picks it up without a restart.
-* **"The sound cards are hidden from this container"**: start the container
-  with `--privileged`.
-* **The DAC isn't listed**: check that it is connected and switched on, and
-  that `aplay -l` on the host lists it.
-* **"Audio is flowing but the DAC's stream format is unknown"**: SQ-tool can
-  see the USB packets but not `/proc/asound`. Use `--privileged`.
-* **"USB events were lost"**: the computer was too busy for the monitor to keep
-  up. Other heavy USB traffic on the same bus can cause it, such as a USB disk
-  on a USB 2 port. Plug the DAC into another port or controller, and capture
-  again.
-* **The sending program is not shown**: add `--pid=host`.
+* **"The Loopback sound card is not loaded"**: press *Load the Loopback driver
+  now*. If there is no button, add `-v /lib/modules:/lib/modules:ro` and
+  `--privileged` to the run command, or run `sudo modprobe snd-aloop` on the
+  server.
+* **Roon doesn't list Loopback**: restart Roon Server after the Loopback card
+  appears.
+* **The recording never starts**: the player isn't playing to the Loopback
+  card. The start page shows what is playing on it right now. Check that the
+  player's output is Loopback, device 0 (`hw:N,0`).
+* **"Your music folder is not connected"**: add `-v /path/to/your/music:/music:ro`
+  to the run command, or upload the song from your phone or tablet instead.
+* **"The sound cards are hidden from this container"**: add `--privileged`.
+* **The sending program isn't shown**: add `--pid=host`.
 
 ## Security
 
-The web page has no login, so keep port 3400 on your home network. The USB
-monitor can see all traffic on the DAC's USB bus; SQ-tool keeps only the DAC's
-audio data.
+The web page has no login, so keep port 3400 on your home network. SQ-tool only
+reads your music folder.
+
+## Command line
+
+The same code runs without Docker:
+
+```sh
+sudo apt install python3-numpy alsa-utils flac   # Debian/Ubuntu; Python 3.8+
+sudo modprobe snd-aloop
+./sq-tool serve --music ~/Music                  # the web interface, as in Docker
+./sq-tool status                                 # sound cards and what they are being sent
+./sq-tool capture roon.wav                       # record a player on the loopback card
+./sq-tool compare song.flac roon.wav mandarin.wav
+./sq-tool analyze roon.wav
+```
 
 ## Tests
 
@@ -275,12 +265,12 @@ pip install numpy
 python3 -m unittest discover -s tests
 ```
 
-The tests need no audio hardware. They simulate the DAC: `/proc/asound`
-entries, plus usbmon events encoded byte for byte as the kernel delivers them.
-They cover:
+The tests need no audio hardware. They simulate:
 
-* exact capture;
-* stream restarts and format changes;
-* comparisons against known manipulations (gain, dither, truncation, EQ,
-  crossfeed, swaps, underruns, dropouts, repeats);
-* the whole web API.
+* the Loopback card (`/proc/asound` and `arecord`);
+* players that play a song to it;
+* a USB DAC's packets, as usbmon delivers them.
+
+They cover recording, comparisons against known changes (gain, dither,
+truncation, EQ, crossfeed, channel swaps, dropouts, repeats, resampling), the
+spectrograms, and the whole web API.

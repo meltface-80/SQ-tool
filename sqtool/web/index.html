@@ -10,25 +10,22 @@
 </head>
 <body>
 <header class="topbar">
-  <div class="brand">
+  <a class="brand" href="#/">
     <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><path d="M3 16h4l3-9 5 18 4-14 3 5h7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    <div>
-      <h1>SQ-tool</h1>
-      <p class="tagline">What does your DAC really receive?</p>
-    </div>
-  </div>
-  <span id="rec-badge" class="live" hidden>REC</span>
+    <span>
+      <span class="title">SQ-tool</span>
+      <span class="tagline">Is your player bit-perfect?</span>
+    </span>
+  </a>
+  <span class="top-actions">
+    <span id="rec-badge" class="live" hidden>REC</span>
+    <button class="iconbtn" id="btn-help" aria-label="Setting up the players" title="Setting up the players">?</button>
+    <button class="iconbtn" id="btn-settings" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+    </button>
+  </span>
 </header>
-<nav class="tabs" role="tablist">
-  <button role="tab" data-view="capture" aria-selected="true">Capture</button>
-  <button role="tab" data-view="library" aria-selected="false">Library <span id="count" class="count"></span></button>
-  <button role="tab" data-view="compare" aria-selected="false">Compare <span id="selcount" class="count"></span></button>
-</nav>
-<main>
-  <section id="view-capture" class="view"></section>
-  <section id="view-library" class="view" hidden></section>
-  <section id="view-compare" class="view" hidden></section>
-</main>
+<main id="main"></main>
 <div id="sheet" class="sheet" hidden>
   <div class="sheet-backdrop" data-close></div>
   <div class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
@@ -36,7 +33,7 @@
     <div id="sheet-body"></div>
   </div>
 </div>
-<footer class="footer"><span id="version">SQ-tool</span> · <a href="https://github.com/meltface-80/SQ-tool">github.com/meltface-80/SQ-tool</a></footer>
+<footer class="footer"><span id="version">SQ-tool</span> · <span id="free"></span> · <a href="https://github.com/meltface-80/SQ-tool">github.com/meltface-80/SQ-tool</a></footer>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script src="app.js"></script>
 </body>
