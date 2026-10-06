@@ -20,7 +20,7 @@ from typing import Callable, List, Optional
 from . import __version__
 from .alsa import (ACTIVE_STATES, CaptureError, find_loopback, kernel_modules_dir, list_cards, load_loopback,
                    playback_streams, proc_asound, process_info, usb_dacs)
-from .sessions import Recorder, Tests, clean
+from .sessions import Recorder, Tests, clean, resolve_device
 from .usbmon import usbmon_path
 from .wavio import AudioFileError
 
@@ -73,13 +73,10 @@ def devices(setting: str, arecord: str) -> dict:
     dacs = [{"id": "usb:%d" % d.card.index, "name": d.card.name, "usbmon": _usbmon_state(d.bus),
              "playing": _playing(d.card.index)} for d in usb_dacs()]
     kind = setting.partition(":")[0]
-    use = None
-    if kind in ("auto", "loopback") and loopback:
-        use = "loopback:%d" % loop.index
-    elif kind == "usb" and dacs:
-        use = setting if any(d["id"] == setting for d in dacs) else dacs[0]["id"]
-    elif kind == "auto" and dacs:
-        use = dacs[0]["id"]
+    try:
+        use = resolve_device(setting)
+    except CaptureError:
+        use = None
     if kind in ("auto", "loopback") and not loopback and cards:
         problems.append("The Loopback sound card is not loaded, so nothing can be recorded yet.")
     if use and use.startswith("usb"):

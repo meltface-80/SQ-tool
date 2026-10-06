@@ -391,7 +391,8 @@
         (cap.player ? " · sent by " + esc(cap.player) : "") + (cap.recorded ? " · " + esc(fmtTime(cap.recorded)) : "");
       return step(n, "done", who + badge, detail, recBtn("Record again", false));
     }
-    var hint = isNext ? "Press Record, then play the song in " + esc(name) + " to the Loopback output." : "";
+    var toUsb = capInfo.use && capInfo.use.indexOf("usb") === 0;
+    var hint = isNext ? "Press Record, then play the song in " + esc(name) + (toUsb ? " to your USB DAC." : " to the Loopback output.") : "";
     return step(n, isNext ? "now" : "", who, hint + failed, recBtn("Record " + name, isNext));
   }
 

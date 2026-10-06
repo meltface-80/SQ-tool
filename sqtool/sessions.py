@@ -31,7 +31,7 @@ from typing import Callable, Iterator, List, Optional, Tuple
 import numpy as np
 
 from .alsa import Capture, CaptureError, CaptureStopped, find_loopback, find_usb_dac, list_cards, usb_dacs
-from .analysis import _chunks, analyze_file, compare, to_float
+from .analysis import _chunks, analyze_file, compare, silence_bounds, to_float
 from .plots import exact_timeline, item_plots, null_plots
 from .report import comparison_lines, headline, short_verdict
 from .spectrogram import difference, fetch_from, render
@@ -117,6 +117,22 @@ def _alignment(res: dict, ref: Audio, cap: Audio) -> dict:
         if a is not None and b is not None:
             out["offset_seconds"] = round(b / cap.rate - a / ref.rate, 6)
     return out
+
+
+def longest_silence(audio: Audio) -> float:
+    """The longest stretch of digital silence inside the music (not before or after it), in seconds."""
+    first, end = silence_bounds(audio.data)
+    last, best = None, 0
+    for a, b in _chunks(first, end):
+        idx = np.flatnonzero(audio.data[a:b].any(axis=1)) + a
+        if idx.size == 0:
+            continue
+        if last is not None:
+            best = max(best, int(idx[0] - last - 1))
+        if idx.size > 1:
+            best = max(best, int((np.diff(idx) - 1).max()))
+        last = int(idx[-1])
+    return best / audio.rate
 
 
 def _first_sound(audio: Audio) -> Optional[int]:
@@ -352,11 +368,6 @@ class Tests:
         who = "source" if which == "source" else t["players"][which]
         return _filename("%s - %s.wav" % (t.get("title") or tid, who))
 
-    def expected_audio_seconds(self, tid: str) -> Optional[float]:
-        a = _read_json(os.path.join(self._dir(tid), "analysis_source.json"))
-        if not a or not a.get("rate") or a.get("silent"):
-            return None
-        return (a["frames"] - a["lead_silence"] - a["trail_silence"]) / a["rate"]
 
     # -- audio cache ---------------------------------------------------------------------
 
@@ -462,6 +473,7 @@ class Tests:
             t["source"].update({"state": "ready", "label": label, "rate": audio.rate, "bits": audio.bits,
                                 "channels": audio.channels, "duration": audio.duration,
                                 "resolution": analysis.get("resolution"),
+                                "longest_silence": round(longest_silence(audio), 3),
                                 "fingerprint": analysis["fingerprint"]})
         self._update(tid, done)
         for slot in SLOTS:  # captures made before the source was ready
@@ -654,7 +666,21 @@ class Tests:
             fh.write(png)
         os.replace(tmp, cache)
         _write_json(info_path, info)
+        self._trim_cache(os.path.dirname(cache))
         return png, info
+
+    @staticmethod
+    def _trim_cache(d: str, keep: int = 400) -> None:
+        """Forget the oldest rendered spectrograms once there are many (every zoom makes new ones)."""
+        try:
+            names = os.listdir(d)
+            if len(names) <= keep:
+                return
+            paths = sorted((os.path.join(d, n) for n in names), key=os.path.getmtime)
+            for path in paths[:len(paths) - keep // 2]:
+                os.unlink(path)
+        except OSError:
+            pass
 
     def difference_wav(self, tid: str, key: str, matched: bool = False) -> Tuple[Iterator[bytes], int, str]:
         """A difference on the source's timeline as a 32-bit float WAV (exact unless `matched`)."""
@@ -721,16 +747,30 @@ def _zoom(ref: Audio, cap: Audio, res: dict, half: int = 96) -> Optional[dict]:
 # Recording
 
 
-def auto_device() -> str:
-    """The loopback card if there is one; otherwise the first USB DAC (recorded over usbmon)."""
-    loop = find_loopback(list_cards())
-    if loop:
-        return "loopback:%d" % loop.index
-    dacs = usb_dacs()
-    if dacs:
-        return "usb:%d" % dacs[0].card.index
-    raise CaptureError("no Loopback sound card found. On the server, run: sudo modprobe snd-aloop "
-                       "(or start the container with -v /lib/modules:/lib/modules:ro so it can load it)")
+NO_LOOPBACK = ("no Loopback sound card found. On the server, run: sudo modprobe snd-aloop "
+               "(or start the container with -v /lib/modules:/lib/modules:ro so SQ-tool can load it)")
+
+
+def resolve_device(setting: str = "auto") -> str:
+    """The device a recording uses for the "Record from" setting: auto, loopback or usb[:card].
+
+    Automatic means the Loopback card, or failing that the first USB DAC (recorded over usbmon).
+    """
+    kind, _, ref = (setting or "auto").partition(":")
+    if kind in ("auto", "loopback"):
+        loop = find_loopback(list_cards())
+        if loop:
+            return "loopback:%d" % loop.index
+        if kind == "loopback":
+            raise CaptureError(NO_LOOPBACK)
+    if kind in ("auto", "usb"):
+        dacs = usb_dacs()
+        if dacs:
+            pick = [d for d in dacs if str(d.card.index) == ref] or dacs
+            return "usb:%d" % pick[0].card.index
+        if kind == "usb":
+            raise CaptureError("no USB DAC found. Is it connected and switched on?")
+    raise CaptureError(NO_LOOPBACK)
 
 
 class Recorder:
@@ -757,12 +797,15 @@ class Recorder:
                 raise CaptureError("a recording is already running: stop it first")
             self._discard_unsaved()
             settings = self.tests.settings()
-            device = settings.get("device") or "auto"
-            if device == "auto":
-                device = auto_device()
-            expected = self.tests.expected_audio_seconds(tid)
-            limit = expected + 3.0 if expected else None
+            device = resolve_device(settings.get("device") or "auto")
+            src = test["source"]
+            # Stop at the end of the song: its length after the music starts, with a margin for
+            # silence the player adds; and after a silence longer than any inside the song.
+            expected = src.get("duration") if src.get("state") == "ready" else None
+            limit = expected + 5.0 if expected else None
             idle = float(settings.get("idle_stop", 5) or 0)
+            if idle and src.get("longest_silence"):
+                idle = max(idle, src["longest_silence"] + 2.0)
             out_dir = os.path.join(self.tests.tmp, "rec-%s" % uuid.uuid4().hex[:8])
             os.makedirs(out_dir)
             self._out_dir = out_dir
@@ -839,4 +882,4 @@ class Recorder:
         return st
 
 
-__all__ = ["Tests", "Recorder", "auto_device", "clean"]
+__all__ = ["Tests", "Recorder", "resolve_device", "clean"]

@@ -13,7 +13,7 @@ import numpy as np
 
 from helpers import FAKE_ARECORD, FakeLoopback, alsa_bytes, music
 
-from sqtool.sessions import Recorder, Tests, _steps
+from sqtool.sessions import Recorder, Tests, _steps, longest_silence, resolve_device
 from sqtool.spectrogram import LUT
 from sqtool.wavio import Audio, info_chunk, read_wav, write_wav
 
@@ -145,7 +145,7 @@ class Recording(SessionBase):
         os.environ["FAKE_FRAME_BYTES"] = str({"S32_LE": 8, "S24_3LE": 6, "S16_LE": 4}[fmt])
         st = self.rec.start(tid, slot)
         self.assertEqual(st["device"], "loopback:1")
-        self.assertAlmostEqual(st["expected_seconds"], 4.0, places=3)
+        self.assertAlmostEqual(st["expected_seconds"], 5.0, places=3)
         time.sleep(0.2)
         self.assertEqual(self.rec.status()["state"], "waiting")
         self.fake.play(fmt, RATE, 2)
@@ -232,6 +232,30 @@ class Recording(SessionBase):
         with self.assertRaises(KeyError):
             self.tests.get(tid)
 
+    def test_silent_passage_does_not_end_the_recording(self):
+        # 6 s of digital silence inside the song: longer than the 5 s silence stop.
+        a = music(rate=RATE, seconds=1.0, lead=0.5, tail=0.0, bits=16, seed=2)
+        b = music(rate=RATE, seconds=1.0, lead=6.0, tail=0.5, bits=16, seed=3)
+        song = np.concatenate([a, b])
+        self.assertAlmostEqual(longest_silence(Audio(data=song, rate=RATE, bits=16)), 6.0, places=4)
+        path = os.path.join(self.music_dir, "Artist", "Album", "02 Gap.wav")
+        write_wav(path, Audio(data=song, rate=RATE, bits=16))
+        tid = self.tests.create(music_rel="Artist/Album/02 Gap.wav")
+        wait_for(lambda: self.tests.get(tid)["source"]["state"] == "ready", what="the source")
+        self.assertEqual(self.tests.get(tid)["source"]["longest_silence"], 6.0)
+        pcm = os.path.join(self.tmp, "gap.pcm")
+        with open(pcm, "wb") as f:
+            f.write(alsa_bytes(song, "S32_LE"))
+        os.environ.update({"FAKE_PCM": pcm, "FAKE_FRAME_BYTES": "8"})
+        self.rec.start(tid, "a")
+        time.sleep(0.2)
+        self.fake.play("S32_LE", RATE, 2)
+        wait_for(lambda: not self.rec.active(), what="the recording")
+        t = self.results(tid, ["a"])
+        self.assertEqual(t["captures"]["a"]["stop_reason"], "the player closed the device")
+        self.assertEqual(t["results"]["a"]["verdict"], "IDENTICAL")
+        self.tests.delete(tid)
+
     def test_stop_before_playback(self):
         tid = self.new_test()
         self.rec.start(tid, "a")
@@ -241,6 +265,14 @@ class Recording(SessionBase):
         st = self.rec.status()
         self.assertEqual((st["state"], st["saved"]), ("done", False))
         self.assertEqual(self.tests.get(tid)["captures"], {})
+
+
+class Devices(SessionBase):
+    def test_resolve_device(self):
+        self.assertEqual(resolve_device("auto"), "loopback:1")
+        self.assertEqual(resolve_device("loopback:7"), "loopback:1")  # the card number moved
+        self.assertEqual(resolve_device("usb"), "usb:2")
+        self.assertEqual(resolve_device("usb:2"), "usb:2")
 
 
 class Alignment(SessionBase):
