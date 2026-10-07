@@ -471,6 +471,15 @@ class WavWriter:
         else:
             self.write(int32_to_container(data, bits))
 
+    def truncate(self, frames: int) -> None:
+        """Drop everything written after the first `frames` frames."""
+        nbytes = min(self.nbytes, max(0, frames) * self.block_align)
+        if nbytes < self.nbytes:
+            self.f.flush()
+            self.f.truncate(self._data_size_pos + 4 + nbytes)
+            self.f.seek(0, os.SEEK_END)
+            self.nbytes = nbytes
+
     @property
     def frames(self) -> int:
         return self.nbytes // self.block_align

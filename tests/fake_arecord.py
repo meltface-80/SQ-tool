@@ -70,9 +70,10 @@ try:
         time.sleep(pause)
     close_dir = os.environ.get("FAKE_CLOSE_DIR")
     if close_dir and not stop:
-        for name in ("hw_params", "status"):
-            with open(os.path.join(close_dir, name), "w") as f:
+        for name in ("hw_params", "status"):  # (whole files at once, as the kernel's are)
+            with open(os.path.join(close_dir, name + ".tmp"), "w") as f:
                 f.write("closed\n")
+            os.replace(os.path.join(close_dir, name + ".tmp"), os.path.join(close_dir, name))
     while not stop:
         out.write(b"\0" * chunk)
         out.flush()

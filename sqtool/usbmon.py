@@ -290,6 +290,8 @@ class UsbCapture:
             self.error = str(exc)
             self.state = "error"
             self.message = str(exc)
+        finally:
+            self.song_end = None  # done with the song (it can be large)
 
     def status(self) -> dict:
         take = self.take
@@ -306,14 +308,15 @@ class UsbCapture:
             "stop_reason": self.stop_reason,
         }
         if take:
+            tracker = take.tracker
+            at = tracker.song_seconds(take.frames) if tracker is not None else None
             out["take"] = {
                 "format": take.params.get("format"), "rate": take.params.get("rate"),
                 "channels": take.params.get("channels"), "player": take.player,
                 "seconds": round(take.frames / take.params["rate"], 2),
                 "music_seconds": None if take.first_audio_frame is None else
                 round((take.frames - take.first_audio_frame) / take.params["rate"], 2),
-                "song_seconds": None if take.tracker is None or take.tracker.song_seconds(take.frames) is None
-                else round(take.tracker.song_seconds(take.frames), 2),
+                "song_seconds": None if at is None else round(at, 2),  # where in the song
                 "interruptions": len(take.interruptions), "packets": take.packets,
             }
         return out
@@ -371,7 +374,7 @@ class UsbCapture:
         if self.max_seconds and take and take.frames >= self.max_seconds * take.params["rate"]:
             self.stop("reached the maximum length")
         if (self.stop_after_audio and take and take.first_audio_frame is not None
-                and (take.tracker is None or take.tracker.stop_frame() is None)
+                and (take.tracker is None or take.tracker.end_frame() is None)
                 and take.frames - take.first_audio_frame >= self.stop_after_audio * take.params["rate"]):
             self.stop("reached the end of the song")
 
@@ -446,6 +449,9 @@ class UsbCapture:
                 self.log("Can't follow the song any more (%s): stopping at silence instead" % exc)
                 take.tracker, end = None, None
             if end is not None and end < take.frames + n:  # the song ends in this transfer
+                if end < take.frames:  # known only once the stream had gone past it: cut back
+                    take.writer.truncate(end)
+                    take.frames = take.writer.frames
                 n = max(0, end - take.frames)
                 payload, raw = payload[:n * take.wav_frame], raw[:n * take.stride]
                 take.ended = True
@@ -529,6 +535,12 @@ class UsbCapture:
         take, self.take = self.take, None
         if take is None:
             return
+        if take.tracker is not None and not take.ended:
+            # Stopped some other way past the song's end (waiting out a dropout, say): cut there.
+            end = take.tracker.end_frame()
+            if end is not None and take.first_audio_frame is not None and take.first_audio_frame < end < take.frames:
+                take.writer.truncate(end)
+                take.frames = take.writer.frames
         take.writer.close()
         if not take.has_audio:  # nothing but digital silence, e.g. a player probing the device
             os.unlink(take.path + ".part")

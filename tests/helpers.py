@@ -115,10 +115,11 @@ class FakeLoopback:
 
     @staticmethod
     def _write(d, hw, status):
-        with open(os.path.join(d, "hw_params"), "w") as f:
-            f.write(hw)
-        with open(os.path.join(d, "status"), "w") as f:
-            f.write(status)
+        # Whole files at once, as the kernel's are: a poll must never see a half-written one.
+        for name, text in (("hw_params", hw), ("status", status)):
+            with open(os.path.join(d, name + ".tmp"), "w") as f:
+                f.write(text)
+            os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
 
     def play(self, fmt="S32_LE", rate=44100, channels=2, state="RUNNING", hw_ptr=0,
              dev=0, sub=0, card=1, pid=None):

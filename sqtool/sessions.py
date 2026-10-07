@@ -35,7 +35,7 @@ from .alsa import (ACTIVE_STATES, Capture, CaptureError, CaptureStopped, find_lo
 from .analysis import _chunks, analyze_file, compare, silence_bounds, to_float
 from .plots import exact_timeline, item_plots, null_plots
 from .report import comparison_lines, headline, short_verdict
-from .songend import SongEnd, envelope, pick_marks
+from .songend import SongEnd, envelope, song_index
 from .spectrogram import difference, fetch_from, render
 from .usbmon import UsbCapture, usbmon_state
 from .wavio import (ALSA_FORMATS, SIDECAR_SUFFIX, Audio, AudioFileError, float_wav_header, load_audio,
@@ -388,20 +388,19 @@ class Tests:
         return _filename("%s - %s.wav" % (t.get("title") or tid, who))
 
     def song_end_data(self, tid: str):
-        """(song, marks, loudness envelope): what a recording needs to find where the song ends."""
-        d = self._dir(tid)
-        song = self._audio(os.path.join(d, "source.wav"))
-        marks_path, env_path = os.path.join(d, "song_end.json"), os.path.join(d, "song_end.npy")
-        marks = _read_json(marks_path).get("marks")
-        if marks is None or not os.path.exists(env_path):
-            marks, env = pick_marks(song), envelope(song)
-            _write_json(marks_path, {"marks": marks})
-            with open(env_path + ".tmp", "wb") as f:
-                np.save(f, env.astype(np.float32))
-            os.replace(env_path + ".tmp", env_path)
-        else:
-            env = np.load(env_path)
-        return song, marks, env
+        """(song, index, loudness envelope): what a recording needs to find where the song ends."""
+        song = self._audio(os.path.join(self._dir(tid), "source.wav"))
+        return song, song_index(song), self._song_envelope(tid, song)
+
+    def _song_envelope(self, tid: str, song: Audio) -> np.ndarray:
+        path = os.path.join(self._dir(tid), "song_end.npy")
+        if os.path.exists(path):
+            return np.load(path)
+        env = envelope(song).astype(np.float32)
+        with open(path + ".tmp", "wb") as f:
+            np.save(f, env)
+        os.replace(path + ".tmp", path)
+        return env
 
     # -- audio cache ---------------------------------------------------------------------
 
@@ -512,7 +511,7 @@ class Tests:
                                 "resolution": analysis.get("resolution"),
                                 "longest_silence": round(longest_silence(audio), 3),
                                 "fingerprint": analysis["fingerprint"]})
-        self.song_end_data(tid)
+        self._song_envelope(tid, audio)
         self._update(tid, done)
         for slot in SLOTS:  # captures made before the source was ready
             if os.path.exists(os.path.join(d, "%s.wav" % slot)):
@@ -847,6 +846,8 @@ class Recorder:
             raise ValueError("the song is still being analysed: try again in a moment"
                              if src.get("state") == "preparing" else
                              "the song could not be read, so there is nothing to compare with")
+        # (Outside the lock: for a long hi-res song this takes a moment the first time.)
+        song, index, env = self.tests.song_end_data(tid)
         with self._lock:
             if self.active():
                 raise CaptureError("a recording is already running: stop it first")
@@ -867,14 +868,13 @@ class Recorder:
             # With the song's length known, its end is timed from the first sound: a player
             # may send silence for a long time first (Squeezelite keeps its output open).
             cap_seconds = None if limit else 1800.0
-            song, marks, env = self.tests.song_end_data(tid)
 
-            def song_end(params: dict, song=song, marks=marks, env=env):
-                """Finds the song in the stream, so the recording stops at its last sample."""
+            def song_end(params: dict, song=song, index=index, env=env):
+                """Follows the song in the stream, so the recording stops at its last sample."""
                 af = ALSA_FORMATS.get(params.get("format"))
                 if af is None:
                     return None
-                return SongEnd(song, marks, env, params["rate"], params["channels"], af.wav_bits, af.is_float)
+                return SongEnd(song, index, env, params["rate"], params["channels"], af.wav_bits, af.is_float)
             if kind == "usb":
                 cap = UsbCapture(find_usb_dac(ref or None), out_dir, name=slot, idle_stop=idle,
                                  max_seconds=cap_seconds, log=self.log, stop_after_audio=limit,
@@ -903,11 +903,11 @@ class Recorder:
 
     @staticmethod
     def _still_playing(test: dict, slot: str, card: int):
-        """Streams the other player of this test still has running on the loopback card (it goes
-        on to the next track once its recording has stopped): ([(device, sub, trigger time)], name).
+        """Streams the other player of this test still has open on the loopback card (it goes on
+        to the next track once its recording has stopped): ([(device, sub, owner pid)], name).
 
-        Only that program's streams, and only as they are now: one that starts afresh is recorded,
-        so two setups of the same program can still be compared."""
+        Only that program's streams, and only while they stay open: once one closes, what opens it
+        next is recorded."""
         other = "b" if slot == "a" else "a"
         prog = (test["captures"].get(other) or {}).get("player")
         mine = (test["captures"].get(slot) or {}).get("player")
@@ -917,7 +917,7 @@ class Recorder:
         for sub in list_subs(card, "p"):
             st = sub.status()
             if st and st["state"] in ACTIVE_STATES and process_info(st.get("owner_pid")).get("name") == prog:
-                found.append((sub.device, sub.sub, st.get("trigger_time")))
+                found.append((sub.device, sub.sub, st.get("owner_pid")))
         return found, (test["players"][other] if found else None)
 
     def _take(self, tid: str, slot: str, path: str, cap) -> None:
