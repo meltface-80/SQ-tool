@@ -7,11 +7,11 @@
   var DIFF = "#e8836b";
   var MUSIC = "#c9c6bd";  // the music beside what remains, on the difference charts
   var ACTIVE = ["starting", "waiting", "recording", "stopping"];
-  // The spectrogram colour map: graphite, bronze, brass, pale gold (matches sqtool/spectrogram.py,
-  // and its name keeps pictures in the old colours out of the browser's cache).
-  var MAP = "brass";
-  var MAP_STEPS = [[18, 20, 22], [44, 34, 29], [69, 49, 39], [95, 64, 47], [122, 81, 52], [148, 100, 56],
-    [170, 122, 63], [190, 146, 76], [208, 171, 97], [223, 196, 132], [237, 221, 173]];
+  // The spectrogram colour map (matches sqtool/spectrogram.py; its name keeps pictures in other
+  // colours out of the browser's cache).
+  var MAP = "inferno";
+  var MAP_STEPS = [[0, 0, 4], [22, 11, 57], [66, 10, 104], [106, 23, 110], [147, 38, 103], [188, 55, 84],
+    [221, 81, 58], [243, 120, 25], [252, 165, 10], [246, 215, 70], [252, 255, 164]];
   var S = {
     page: null, tid: null, state: null, test: null, rev: null, html: {}, charts: [], timer: null,
     browsePath: load("sq.browse", ""), searchSeq: 0,
@@ -683,7 +683,7 @@
       : fmtAt(sp.t0, decimals(span)) + " – " + fmtAt(sp.t1, decimals(span)) + " (" + fmtSecs(span) + ")";
     $("#spec-note").innerHTML = sp.mode === "signals"
       ? "Each picture shows one recording over the same stretch of the song, on one colour scale. Drag across a picture to zoom in; tap to read the time and frequency."
-      : "What is left when one recording is subtracted from the other, sample by sample. <b>Dark graphite means the samples are identical.</b>" +
+      : "What is left when one recording is subtracted from the other, sample by sample. <b>Black means the samples are identical.</b>" +
         (sp.matched ? " With “Match levels first”, a plain volume difference is removed before subtracting." : "");
     $("#spec-note").innerHTML += " Red lines mark dropouts (gaps or jumps in a stream): the pictures skip over them to keep everything lined up with the song.";
     var dpr = Math.min(window.devicePixelRatio || 1, 2.5);

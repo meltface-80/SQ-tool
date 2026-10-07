@@ -221,7 +221,7 @@ details > summary { cursor: pointer; color: var(--accent-ink); font-weight: 600;
 .zoombar .btn { min-width: 44px; padding: 6px 10px; min-height: 40px; }
 .zoombar .range { font-variant-numeric: tabular-nums; font-size: .88rem; color: var(--muted); margin-left: 4px; }
 .spec-stack { position: relative; display: grid; gap: 6px; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: crosshair; }
-.spec-panel { position: relative; height: 150px; border-radius: 8px; overflow: hidden; background: #121416; }
+.spec-panel { position: relative; height: 150px; border-radius: 8px; overflow: hidden; background: #000004; }
 @media (min-width: 700px) { .spec-panel { height: 210px; } }
 .spec-panel img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; -webkit-user-drag: none; pointer-events: none; }
 .spec-label {
