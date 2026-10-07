@@ -1,8 +1,8 @@
 # SQ-tool
 
-**Is your music player bit-perfect? SQ-tool records exactly what Roon, Mandarin
-or any other player sends to its output, and compares it sample by sample with
-the original file and with each other.**
+**Is your music player bit-perfect? SQ-tool records exactly what Roon, Mandarin,
+Lyrion (Squeezelite) or any other player sends to its output, and compares it
+sample by sample with the original file and with each other.**
 
 It runs in Docker on the computer your players run on. You use it from a phone
 or tablet at `http://<server>:3400`:
@@ -112,9 +112,36 @@ command.
      management, sample rate conversion, EQ, crossfeed, convolution.
 3. When testing, play the song to that zone.
 
+**Lyrion Music Server.** Lyrion plays through a player, usually Squeezelite.
+Run a second Squeezelite on the server that plays to the Loopback card:
+
+```sh
+squeezelite -n SQ-tool -m 02:00:00:00:00:01 -o hw:CARD=Loopback,DEV=0 -s 127.0.0.1
+```
+
+`-n` is the name it gets in Lyrion, `-m` a MAC address no other player uses,
+`-o` the Loopback output, and `-s` the Lyrion server (127.0.0.1 when it runs on
+the same computer).
+
+1. In Lyrion, give the "SQ-tool" player the same settings as your DAC's
+   player, so the test shows what your DAC gets.
+2. For a pure bit-perfect check, set these in the player's *Audio* settings:
+   * *Volume Control*: output level fixed at 100%;
+   * *Replay Gain*: off;
+   * *Crossfade*: no fade;
+   * *Bitrate Limiting*: no limit.
+3. Play the song to that player.
+
+Squeezelite keeps its output open, sending silence, while the player is on.
+SQ-tool waits for the music and times the song from there.
+
 **Mandarin** (or any other player): choose the output device **Loopback**
 (`hw:Loopback,0`, or `hw:N,0` with the card number the page shows), the same
 way you would choose your DAC.
+
+Each test compares two players. Their names are set in *Settings*, or with **⋯**
+on a test. To compare, say, Roon against Lyrion, name the second player
+"Lyrion".
 
 ## Using it
 
@@ -123,12 +150,17 @@ way you would choose your DAC.
   AIFF files.
 * Press **Record Roon**. SQ-tool waits for playback on the Loopback card. Then
   play the song in Roon, from the beginning. Recording starts when Roon starts
-  sending audio, and stops by itself:
-  * at the end of the song;
-  * when Roon closes the output;
-  * or after 5 seconds of digital silence (this can be changed in Settings).
-
-  You can also press **Stop now**.
+  sending audio.
+* Recording stops by itself **at the song's last sample**. SQ-tool recognises
+  the song in what Roon sends, so it stops there even when Roon goes straight
+  on to the next track in its queue.
+  * From a player that isn't bit-perfect, SQ-tool finds the song by
+    correlation instead, and the recording ends a quarter of a second after the
+    song.
+  * It also stops when Roon closes the output, or after 5 seconds of digital
+    silence. The silence time can be changed in Settings; if the song itself
+    has a longer silent passage, SQ-tool waits longer.
+  * You can also press **Stop now**.
 * Press **Record Mandarin** and do the same.
 * **Results** appear as soon as each recording is analysed: one card for each
   player against the file, and one for the two players against each other.
@@ -147,12 +179,15 @@ yellow (0 dB, full scale).
   identical, the pictures are identical.
 * **Differences** shows what is left when one recording is subtracted from the
   other, sample by sample: Roon − file, Mandarin − file and Mandarin − Roon.
-  **Black means no difference at all.**
+  **Black means the samples are identical.**
   * **Match levels first** removes a plain volume difference before
     subtracting. It shows what else changed, such as dither or EQ.
+* **Red lines** mark dropouts: gaps or jumps in a player's stream. The pictures
+  and the difference files skip over a dropout to keep everything lined up with
+  the song, so a dropout shows as a red line rather than as a difference.
 * **Drag** across the pictures to zoom into that part of the song, down to a
-  few milliseconds. Use the buttons to zoom out, move, or go back to the whole
-  song.
+  few hundredths of a second. Use the buttons to zoom out, move, or go back to
+  the whole song.
 * **Tap** (or hover with a mouse) to read the time and frequency.
 * **Log / Linear** sets the frequency scale, and the menu sets the lowest level
   shown. Lower it (−180 or −210 dB) to see dither at 24 bits.
@@ -218,6 +253,8 @@ The players then play to the DAC as usual.
 * Play the same file in both players, from the beginning.
 * Record the same player twice. The two recordings should be identical, which
   shows the measurement itself is consistent.
+* Roon may still be playing its next track when you record Mandarin. SQ-tool
+  leaves that stream alone and records Mandarin.
 * Recording starts a moment after the player starts. Most songs begin with
   digital silence, so nothing is lost. If a song starts with sound right away,
   its first few milliseconds may be missing. The verdict then says so, and

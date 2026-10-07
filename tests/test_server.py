@@ -103,7 +103,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(t["results"]["ab"]["verdict"], "DIFFERENT")
         self.assertIn("level changed: -0.500 dB, -0.500 dB (by channel)", t["results"]["b"]["lines"])
         st = call(self.base, "/api/state")[1]["recorder"]
-        self.assertEqual((st["state"], st["saved"], st["stop_reason"]), ("done", True, "the player closed the device"))
+        self.assertEqual((st["state"], st["saved"], st["stop_reason"]), ("done", True, "reached the end of the song"))
 
         listed = call(self.base, "/api/tests")[1]
         self.assertEqual(listed[0]["id"], tid)
@@ -189,6 +189,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         status, s, _ = call(self.base, "/api/settings", "POST", {"players": {"a": "Roon"}, "idle_stop": 4})
         self.assertEqual((status, s["idle_stop"]), (200, 4.0))
+        import http.client
+        conn = http.client.HTTPConnection(self.base[len("http://"):], timeout=10)
+        conn.putrequest("POST", "/api/settings")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual((resp.status, json.loads(resp.read())["error"]), (400, "bad request length"))
+        conn.close()
         status, r, _ = call(self.base, "/api/loopback/load", "POST")
         self.assertEqual((status, r["message"]), (200, "the Loopback card is already there"))
 

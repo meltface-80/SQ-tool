@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import tempfile
 import time
 import unittest
@@ -14,7 +15,7 @@ import numpy as np
 from helpers import FAKE_ARECORD, FakeLoopback, alsa_bytes, music
 
 from sqtool.alsa import CaptureError
-from sqtool.sessions import Recorder, Tests, _steps, longest_silence, resolve_device
+from sqtool.sessions import Recorder, Tests, _steps, longest_silence, readable_formats, resolve_device
 from sqtool.spectrogram import LUT
 from sqtool.wavio import Audio, info_chunk, read_wav, write_wav
 
@@ -44,6 +45,14 @@ def volume_with_dither(data, db=-0.5, seed=7):
     x = data.astype(np.float64) * 10 ** (db / 20) / 256
     x += rng.random(x.shape) - rng.random(x.shape)
     return (np.round(x) * 256).astype(np.int32)
+
+
+def named_process(tmp, name):
+    """A process listed under `name`, standing in for a player program."""
+    exe = os.path.join(tmp, name)
+    if not os.path.exists(exe):
+        shutil.copy("/bin/sleep", exe)
+    return subprocess.Popen([exe, "1000"])
 
 
 def wait_for(fn, timeout=60.0, what="condition"):
@@ -117,7 +126,8 @@ class MusicFolder(SessionBase):
         album = self.tests.browse("Artist/Album")
         self.assertEqual([f["name"] for f in album["files"]], ["01 Song.wav"])  # not cover.jpg
         self.assertEqual(self.tests.search("song artist"),
-                         [{"path": "Artist/Album/01 Song.wav", "name": "01 Song.wav", "folder": "Artist/Album"}])
+                         [{"path": "Artist/Album/01 Song.wav", "name": "01 Song.wav", "folder": "Artist/Album",
+                           "ok": True}])
         self.assertEqual(self.tests.search("nothing like this"), [])
         with self.assertRaises(ValueError):
             self.tests.browse("../..")
@@ -125,6 +135,23 @@ class MusicFolder(SessionBase):
             self.tests.browse("Nope")
         with self.assertRaises(ValueError):
             self.tests.create(music_rel="../data/settings.json")
+
+    def test_formats_that_cannot_be_read_here(self):
+        from unittest import mock
+        path = os.path.join(self.music_dir, "Artist", "Album", "02 Other.m4a")
+        with open(path, "wb") as f:
+            f.write(b"\0" * 64)
+        self.tests._index = None  # searched before this file existed
+        try:
+            files = {f["name"]: f["ok"] for f in self.tests.browse("Artist/Album")["files"]}
+            self.assertEqual(files, {"01 Song.wav": True, "02 Other.m4a": ".m4a" in readable_formats()})
+            with mock.patch("shutil.which", return_value=None):  # no ffmpeg, no flac
+                self.assertEqual(readable_formats(), {".wav", ".wave", ".aif", ".aiff", ".aifc"})
+                self.assertFalse(self.tests.search("other")[0]["ok"])
+                with self.assertRaises(ValueError):
+                    self.tests.create(music_rel="Artist/Album/02 Other.m4a")
+        finally:
+            os.unlink(path)
 
     def test_settings(self):
         s = self.tests.save_settings({"players": {"a": "Roon 2", "b": ""}, "idle_stop": "8"})
@@ -136,7 +163,7 @@ class MusicFolder(SessionBase):
 
 
 class Recording(SessionBase):
-    def record(self, tid, slot, data, fmt, lead_frames=0):
+    def record(self, tid, slot, data, fmt, lead_frames=0, sub=0, pid=None):
         """Record `slot` while a simulated player plays `data` to the loopback card in format `fmt`."""
         pcm = os.path.join(self.tmp, "%s.pcm" % slot)
         payload = np.concatenate([np.zeros((lead_frames, data.shape[1]), np.int32), data])
@@ -149,7 +176,7 @@ class Recording(SessionBase):
         self.assertAlmostEqual(st["expected_seconds"], 5.0, places=3)
         time.sleep(0.2)
         self.assertEqual(self.rec.status()["state"], "waiting")
-        self.fake.play(fmt, RATE, 2)
+        self.fake.play(fmt, RATE, 2, sub=sub, pid=pid)
         wait_for(lambda: not self.rec.active(), what="the recording")
         st = self.rec.status()
         self.assertTrue(st["saved"], st)
@@ -168,7 +195,7 @@ class Recording(SessionBase):
         t = self.results(tid, ["a"])
         cap = t["captures"]["a"]
         self.assertEqual((cap["format"], cap["rate"], cap["method"], cap["resolution"]), ("S32_LE", RATE, "loopback", 16))
-        self.assertEqual(cap["stop_reason"], "the player closed the device")
+        self.assertEqual(cap["stop_reason"], "reached the end of the song")
         self.assertEqual(cap["fingerprint"], t["source"]["fingerprint"])
         res = t["results"]["a"]
         self.assertEqual((res["verdict"], res["short"], res["match"]), ("IDENTICAL", "BIT-PERFECT", True))
@@ -215,8 +242,9 @@ class Recording(SessionBase):
 
         roon = read_wav(self.tests.audio_path(tid, "a")).data
         lead = int(0.2 * RATE)
-        self.assertTrue(np.array_equal(roon[lead:lead + len(self.src)], self.src))
-        self.assertFalse(roon[:lead].any() or roon[lead + len(self.src):].any())
+        self.assertEqual(len(roon), lead + len(self.src))  # ends with the song's last sample
+        self.assertTrue(np.array_equal(roon[lead:], self.src))
+        self.assertFalse(roon[:lead].any())
         self.assertEqual(self.tests.audio_filename(tid, "b"), "Song - Mandarin.wav")
         listed = [x for x in self.tests.list() if x["id"] == tid][0]
         self.assertEqual(listed["results"]["a"]["short"], "BIT-PERFECT")
@@ -253,8 +281,108 @@ class Recording(SessionBase):
         self.fake.play("S32_LE", RATE, 2)
         wait_for(lambda: not self.rec.active(), what="the recording")
         t = self.results(tid, ["a"])
-        self.assertEqual(t["captures"]["a"]["stop_reason"], "the player closed the device")
+        self.assertEqual(t["captures"]["a"]["stop_reason"], "reached the end of the song")
         self.assertEqual(t["results"]["a"]["verdict"], "IDENTICAL")
+        self.tests.delete(tid)
+
+    def test_stops_at_the_end_of_the_song_before_the_next_track(self):
+        # Players go straight on to the next track in their queue: the recording still ends with
+        # the song's last sample.
+        tid = self.new_test()
+        following = music(rate=RATE, seconds=3.0, lead=0.0, tail=0.0, bits=16, seed=11)
+        lead = int(0.2 * RATE)
+        roon, mandarin = named_process(self.tmp, "RAATServer"), named_process(self.tmp, "mandarin")
+        self.addCleanup(lambda: [p.kill() or p.wait() for p in (roon, mandarin)])
+        self.record(tid, "a", np.concatenate([self.src, following]), "S32_LE", lead_frames=lead, pid=roon.pid)
+        t = self.results(tid, ["a"])
+        cap, res = t["captures"]["a"], t["results"]["a"]
+        self.assertEqual(cap["stop_reason"], "reached the end of the song")
+        self.assertEqual(read_wav(self.tests.audio_path(tid, "a")).frames, lead + len(self.src))
+        self.assertEqual(t["analysis"]["a"]["capture"]["song_end"]["how"], "exact")
+        self.assertEqual(res["verdict"], "IDENTICAL")
+
+        # Roon goes on playing its next track (the simulated one never closes its output).
+        # Mandarin plays on the next free substream: that is what gets recorded, not Roon.
+        # It isn't bit-perfect (-0.5 dB with dither): found by correlation, stopped just after the song.
+        self.assertEqual(self.fake.subdir(0, "p", 0)[-4:], "sub0")
+        self.record(tid, "b", np.concatenate([volume_with_dither(self.src), volume_with_dither(following, seed=3)]),
+                    "S24_3LE", lead_frames=lead, sub=1, pid=mandarin.pid)
+        self.assertEqual(self.rec.status()["ignoring"], "Roon")
+        t = self.results(tid, ["b"])
+        self.assertEqual(t["captures"]["b"]["player"], "mandarin")
+        frames = read_wav(self.tests.audio_path(tid, "b")).frames
+        self.assertEqual(t["captures"]["b"]["stop_reason"], "reached the end of the song")
+        self.assertEqual(frames, lead + len(self.src) + int(0.25 * RATE))  # the song and a 0.25 s margin
+        self.assertEqual(t["analysis"]["b"]["capture"]["song_end"]["how"], "aligned")
+        self.assertEqual(t["results"]["b"]["verdict"], "DIFFERENT")
+        self.fake.close(sub=0)
+        self.fake.close(sub=1)
+        self.tests.delete(tid)
+
+    def test_output_open_and_silent_long_before_the_song(self):
+        # Squeezelite keeps its output open, sending silence, until a song starts: here for 45 s,
+        # longer than the song plus every margin. The song is still recorded whole.
+        tid = self.new_test()
+        self.record(tid, "a", self.src, "S32_LE", lead_frames=45 * RATE)
+        t = self.results(tid, ["a"])
+        self.assertEqual(t["results"]["a"]["verdict"], "IDENTICAL")
+        self.tests.delete(tid)
+
+    def silent_player(self, seconds, close):
+        pcm = os.path.join(self.tmp, "silence.pcm")
+        with open(pcm, "wb") as f:
+            f.write(b"\0" * (seconds * RATE * 8))
+        os.environ.update({"FAKE_PCM": pcm, "FAKE_FRAME_BYTES": "8"})
+        if not close:
+            os.environ.pop("FAKE_CLOSE_DIR")
+
+    def test_only_silence_arrives(self):
+        tid = self.new_test()
+        self.silent_player(3, close=True)
+        self.rec.max_wait_audio = 1
+        try:
+            self.rec.start(tid, "a")
+            time.sleep(0.2)
+            self.fake.play("S32_LE", RATE, 2)
+            wait_for(lambda: not self.rec.active(), what="the recording")
+        finally:
+            self.rec.max_wait_audio = 600
+            self.fake.close()  # stopped early, the simulated player never closed its output
+        st = self.rec.status()
+        self.assertEqual((st["state"], st["saved"]), ("error", False))
+        self.assertIn("only digital silence arrived (no music arrived within 1 s)", st["error"])
+        self.assertEqual(self.tests.get(tid)["captures"], {})
+        self.tests.delete(tid)
+
+    def test_cancel_while_the_output_is_silent(self):
+        tid = self.new_test()
+        self.silent_player(60, close=False)
+        try:
+            self.rec.start(tid, "a")
+            time.sleep(0.2)
+            self.fake.play("S32_LE", RATE, 2)
+            st = wait_for(lambda: self.rec.status().get("take") and self.rec.status(), what="the open output")
+            self.assertEqual(st["state"], "recording")
+            self.assertIsNone(st["take"]["music_seconds"])  # listening, but no music yet
+            self.rec.stop()
+            wait_for(lambda: not self.rec.active(), what="the stop")
+        finally:
+            os.environ["FAKE_CLOSE_DIR"] = self.fake.subdir(0, "p", 0)
+            self.fake.close()
+        st = self.rec.status()
+        self.assertEqual((st["state"], st["saved"], st["error"]), ("done", False, None))
+        self.assertEqual(self.tests.get(tid)["captures"], {})
+        self.tests.delete(tid)
+
+    def test_record_waits_for_the_song(self):
+        tid = self.new_test()
+        self.tests._update(tid, lambda t: t["source"].update(state="preparing"))
+        with self.assertRaises(ValueError):
+            self.rec.start(tid, "a")
+        self.tests._update(tid, lambda t: t["source"].update(state="error"))
+        with self.assertRaises(ValueError):
+            self.rec.start(tid, "a")
+        self.assertFalse(self.rec.active())
         self.tests.delete(tid)
 
     def test_stop_before_playback(self):
@@ -305,6 +433,20 @@ class Alignment(SessionBase):
         # On the source's timeline the dropout is skipped, so nothing else shows as different.
         self.assertTrue(is_black(self.tests.spectrogram(tid, "diff-a", 0, 0, 400, 100)[0]))
         self.assertFalse(read_wav(b"".join(self.tests.difference_wav(tid, "a")[0])).data.any())
+
+    def test_spectrogram_time_range(self):
+        tid = self.new_test()
+        # Zoomed in further than one sample per pixel: the picture still spans exactly what was asked.
+        png, info = self.tests.spectrogram(tid, "source", 2.0, 2.01, 2000, 100)
+        self.assertEqual(png_pixels(png).shape, (100, 2000, 3))
+        self.assertAlmostEqual(info["t0"], 2.0, places=4)
+        self.assertAlmostEqual(info["t1"], 2.01, places=4)
+        # Beyond the end of the song: kept within it.
+        png, info = self.tests.spectrogram(tid, "source", 0, 1e7, 200, 64)
+        self.assertAlmostEqual(info["t1"], 5.0, places=4)
+        png, info = self.tests.spectrogram(tid, "source", 1e6, 0, 200, 64)
+        self.assertLess(info["t0"], 5.0)
+        self.tests.delete(tid)
 
     def test_resampled_capture(self):
         tid = self.new_test()

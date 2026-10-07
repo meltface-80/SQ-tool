@@ -87,6 +87,8 @@ def alsa_bytes(data: np.ndarray, fmt: str) -> bytes:
 class FakeLoopback:
     """A /proc/asound tree with a Loopback card (card 1) whose state tests can change."""
 
+    starts = 0  # each stream gets its own trigger time, as in the kernel
+
     def __init__(self, root: str):
         self.root = root
         os.makedirs(root, exist_ok=True)
@@ -122,10 +124,11 @@ class FakeLoopback:
              dev=0, sub=0, card=1, pid=None):
         hw = ("access: MMAP_INTERLEAVED\nformat: %s\nsubformat: STD\nchannels: %d\n"
               "rate: %d (%d/1)\nperiod_size: 1024\nbuffer_size: 4096\n" % (fmt, channels, rate, rate))
-        status = ("state: %s\nowner_pid   : %d\ntrigger_time: 100.000000000\n"
+        FakeLoopback.starts += 1
+        status = ("state: %s\nowner_pid   : %d\ntrigger_time: %d.000000000\n"
                   "tstamp      : 101.000000000\ndelay       : 3072\navail       : 1024\n"
                   "avail_max   : 1024\n-----\nhw_ptr      : %d\nappl_ptr    : %d\n"
-                  % (state, pid or os.getpid(), hw_ptr, hw_ptr + 3072))
+                  % (state, pid or os.getpid(), 100 + FakeLoopback.starts, hw_ptr, hw_ptr + 3072))
         self._write(self.subdir(dev, "p", sub, card), hw, status)
 
     def close(self, dev=0, sub=0, card=1):

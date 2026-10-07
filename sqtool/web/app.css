@@ -168,6 +168,7 @@ input[type=text], input[type=number], input[type=search], textarea, select {
 .file .fmeta { color: var(--muted); font-size: .8rem; white-space: nowrap; }
 .file.song .fname { font-weight: 600; }
 .file.song .ico { color: var(--accent); }
+.file.off { opacity: .5; cursor: default; }
 .upload-progress { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
 .upload-progress span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
 
@@ -245,8 +246,8 @@ details > summary { cursor: pointer; color: var(--accent); font-weight: 600; min
   background: rgba(0, 0, 0, .45); padding: 0 3px; border-radius: 3px; white-space: nowrap;
 }
 .spec-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 8px; color: #cbd5e1; font-size: .88rem; padding: 0 16px; text-align: center; z-index: 1; pointer-events: none; }
-.spec-marks { position: absolute; left: 0; right: 0; bottom: 0; height: 5px; z-index: 2; pointer-events: none; }
-.spec-marks span { position: absolute; top: 0; height: 5px; min-width: 2px; background: #ef4444; }
+.spec-marks { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.spec-marks span { position: absolute; top: 0; bottom: 0; min-width: 2px; background: rgba(239, 68, 68, .6); }
 .spec-sel { position: absolute; top: 0; bottom: 0; background: rgba(56, 189, 248, .22); border-left: 1px solid #38bdf8; border-right: 1px solid #38bdf8; z-index: 3; pointer-events: none; }
 .spec-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, .75); z-index: 3; pointer-events: none; }
 .spec-readout {
