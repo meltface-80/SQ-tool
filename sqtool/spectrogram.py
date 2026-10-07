@@ -26,7 +26,10 @@ from .wavio import Audio
 
 Fetch = Callable[[int, int], np.ndarray]  # frames [start, end) of the source timeline -> (n, channels)
 
-# An "inferno"-style perceptual colour map: black, purple, red, orange, yellow, pale yellow.
+# An "inferno"-style perceptual colour map: black, purple, red, orange, yellow, pale yellow. The
+# name goes into cached pictures' keys (and the page's requests): a new map must not be mixed with
+# pictures made with an old one.
+COLOUR_MAP = "inferno"
 ANCHORS = [(0.0, (0, 0, 4)), (0.1, (22, 11, 57)), (0.2, (66, 10, 104)), (0.3, (106, 23, 110)),
            (0.4, (147, 38, 103)), (0.5, (188, 55, 84)), (0.6, (221, 81, 58)), (0.7, (243, 120, 25)),
            (0.8, (252, 165, 10)), (0.9, (246, 215, 70)), (1.0, (252, 255, 164))]
