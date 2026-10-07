@@ -225,6 +225,9 @@ class Take:
     first_ts: Optional[float] = None
     last_ts: Optional[float] = None
     dac_rate: Optional[int] = None
+    tracker: object = None  # a songend.SongEnd: where the song ends in this take
+    wav_frame: int = 0  # bytes per frame in the WAV file
+    ended: bool = False  # the song ended: nothing more is kept
 
 
 class UsbCapture:
@@ -233,8 +236,10 @@ class UsbCapture:
     def __init__(self, dac: UsbAudio, out_dir: str, name: str = "capture", idle_stop: float = 5.0,
                  max_seconds: Optional[float] = None, on_take: Optional[Callable[[str, dict], None]] = None,
                  log: Callable[[str], None] = print, source=None, gap: float = 0.25,
-                 stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None):
+                 stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None,
+                 song_end: Optional[Callable[[dict], object]] = None):
         self.dac = dac
+        self.song_end = song_end  # makes a songend.SongEnd for a take's format (see alsa.Capture)
         self.stop_after_audio = stop_after_audio  # seconds after the music starts (the song's length)
         self.max_wait_audio = max_wait_audio  # give up when no music arrives within this many seconds
         self.out_dir = out_dir
@@ -307,6 +312,8 @@ class UsbCapture:
                 "seconds": round(take.frames / take.params["rate"], 2),
                 "music_seconds": None if take.first_audio_frame is None else
                 round((take.frames - take.first_audio_frame) / take.params["rate"], 2),
+                "song_seconds": None if take.tracker is None or take.tracker.song_seconds(take.frames) is None
+                else round(take.tracker.song_seconds(take.frames), 2),
                 "interruptions": len(take.interruptions), "packets": take.packets,
             }
         return out
@@ -364,6 +371,7 @@ class UsbCapture:
         if self.max_seconds and take and take.frames >= self.max_seconds * take.params["rate"]:
             self.stop("reached the maximum length")
         if (self.stop_after_audio and take and take.first_audio_frame is not None
+                and (take.tracker is None or take.tracker.stop_frame() is None)
                 and take.frames - take.first_audio_frame >= self.stop_after_audio * take.params["rate"]):
             self.stop("reached the end of the song")
 
@@ -404,7 +412,7 @@ class UsbCapture:
         if self._new_run or self.take is None:
             self._begin_run(ev.ts)
         take = self.take
-        if take is None:
+        if take is None or take.ended:
             return
         if ev.flag_data != b"\0":  # usbmon could not copy this transfer's data
             take.uncaptured += 1
@@ -429,11 +437,24 @@ class UsbCapture:
         raw = data[:usable]
         if not raw:
             return
-        take.writer.write(take.convert(raw) if take.convert else raw)
-        take.frames += usable // take.stride
+        payload = take.convert(raw) if take.convert else raw
+        n = usable // take.stride
+        if take.tracker is not None:
+            try:
+                end = take.tracker.feed(payload)
+            except Exception as exc:  # never lose a recording over this: just stop following
+                self.log("Can't follow the song any more (%s): stopping at silence instead" % exc)
+                take.tracker, end = None, None
+            if end is not None and end < take.frames + n:  # the song ends in this transfer
+                n = max(0, end - take.frames)
+                payload, raw = payload[:n * take.wav_frame], raw[:n * take.stride]
+                take.ended = True
+                self.stop("reached the end of the song")
+        take.writer.write(payload)
+        take.frames += n
         if np.frombuffer(raw, dtype=np.uint8).any():
             if take.first_audio_frame is None:
-                take.first_audio_frame = take.frames - usable // take.stride
+                take.first_audio_frame = take.frames - n
             take.has_audio = True
             self._last_sound = time.monotonic()
         if self.state != "recording":
@@ -497,7 +518,9 @@ class UsbCapture:
         self.take = Take(params=dict(hw), path=path, writer=writer, stride=width * hw["channels"],
                          convert=convert, dsd=dsd,
                          started_wall=datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                         cpu0=cpu_snapshot(), player=player, dac_rate=self._dac_rate)
+                         cpu0=cpu_snapshot(), player=player, dac_rate=self._dac_rate,
+                         tracker=self.song_end(hw) if self.song_end and not dsd else None,
+                         wav_frame=bits // 8 * hw["channels"])
         self.log("Recording %s, %d Hz, %d ch from %s%s" % (
             fmt, hw["rate"], hw["channels"], self.dac.card.name,
             " (sent by %s)" % player["name"] if player else ""))
@@ -530,6 +553,7 @@ class UsbCapture:
                 "frames": take.frames,
                 "seconds": round(take.frames / rate, 3),
                 "stop_reason": self.stop_reason or "stream format changed",
+                "song_end": take.tracker.summary() if take.tracker is not None else None,
                 "interruptions": take.interruptions[:500],
                 "player_xruns_seen": self._xruns,
                 "player_states": self._states[-200:],

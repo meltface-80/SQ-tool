@@ -411,7 +411,7 @@
         '</b></span></div><div class="clock" id="live-clock"></div>' +
         '<div class="progress" id="live-bar"' + (rec.expected_seconds ? "" : " hidden") + '><span></span></div>' +
         '<div class="small muted" id="live-fmt"></div>' +
-        '<div class="small muted">It stops by itself at the end of the song.</div>' +
+        '<div class="small muted">It stops by itself at the song\'s last sample, even if ' + esc(name) + " goes on to the next track.</div>" +
         '<div class="row"><button class="btn rec" data-act="stop">Stop now</button></div></div>';
     }
     if (rec.state === "stopping") return '<div class="live-box"><div class="row"><span class="spinner"></span> Finishing the recording…</div></div>';
@@ -419,6 +419,9 @@
     var where = cap.use && cap.use.indexOf("usb") === 0 ? "to your USB DAC" : "to the <b>Loopback</b> output" + (lp ? " (" + esc(lp.play_to) + ")" : "");
     // A player can hold its output open and silent before the song starts (Squeezelite does).
     var open = rec.state === "recording" ? '<div class="small muted">' + esc(name) + "'s output is open and silent: SQ-tool is listening.</div>" : "";
+    if (rec.ignoring && rec.state !== "recording") {
+      open += '<div class="small muted">' + esc(rec.ignoring) + " is still playing to the Loopback (it went on to its next track). SQ-tool leaves that alone and waits for " + esc(name) + ".</div>";
+    }
     return '<div class="live-box" aria-live="polite"><div class="row"><span class="spinner"></span><b>Waiting for ' + esc(name) + "…</b></div>" +
       "<div>Now play <b>“" + esc(t.title) + "”</b> in " + esc(name) + ", from the beginning, " + where + ". Recording starts by itself.</div>" + open +
       '<div class="row"><button class="btn" data-act="stop">Cancel</button><button class="linkbtn" data-act="help">How do I set up ' + esc(name) + "?</button></div></div>";
@@ -428,7 +431,9 @@
     // The clock and progress change every second: update them in place, not by re-rendering.
     var clock = $("#live-clock");
     if (!clock || !hearing(rec)) return;
-    var take = rec.take, secs = take.music_seconds, exp = rec.expected_seconds;
+    // Where in the song the player is, once SQ-tool has recognised it; until then, time since the music began.
+    var take = rec.take, secs = take.song_seconds != null ? Math.max(0, take.song_seconds) : take.music_seconds;
+    var exp = rec.expected_seconds;
     clock.innerHTML = fmtClock(secs) + (exp ? " <small>/ " + fmtClock(exp) + "</small>" : "");
     var bar = $("#live-bar span");
     if (bar && exp) bar.style.width = Math.min(100, 100 * secs / exp).toFixed(1) + "%";

@@ -148,7 +148,7 @@ def parse_status(text: Optional[str]) -> Optional[dict]:
         if not sep:
             continue
         key, val = key.strip(), val.strip()
-        if key == "state":
+        if key in ("state", "trigger_time"):
             out[key] = val
         elif key in ("owner_pid", "delay", "avail", "avail_max", "hw_ptr", "appl_ptr"):
             try:
@@ -447,8 +447,17 @@ class Capture:
                  prearm: Optional[Tuple[str, int, int]] = None, device: Optional[int] = None,
                  subdevice: Optional[int] = None, arecord: str = "arecord", poll: float = 0.01,
                  log: Callable[[str], None] = print, handle_sigint: bool = True,
-                 stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None):
+                 stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None,
+                 song_end: Optional[Callable[[dict], object]] = None,
+                 ignore: Optional[List[Tuple[int, int, Optional[str]]]] = None):
         self.out_path = out_path
+        # Streams to pass over while they go on as they were: (device, subdevice, trigger time).
+        # Another player left playing (the next track in its queue) shouldn't be recorded instead.
+        self.ignore = {(d, s): t for d, s, t in (ignore or [])}
+        # Makes a songend.SongEnd for the stream's format: it finds where the song ends, and the
+        # recording stops (and is cut) exactly there, even if the player goes on to another track.
+        self.song_end = song_end
+        self.tracker = None
         self.stop_after_audio = stop_after_audio  # seconds after the music starts (the song's length)
         # Give up after this many seconds of a player sending only silence. Some players
         # (Squeezelite, for one) keep their output open and silent until a song starts.
@@ -492,6 +501,8 @@ class Capture:
                            "seconds": round(self.frames / rate, 2),
                            # how long the music has been playing (None: only silence so far)
                            "music_seconds": None if first is None else round((self.frames - first) / rate, 2)}
+            at = self.tracker.song_seconds(self.frames) if self.tracker is not None else None
+            out["take"]["song_seconds"] = None if at is None else round(at, 2)  # where in the song
         return out
 
     # -- finding the player -------------------------------------------------
@@ -522,6 +533,10 @@ class Capture:
                 raise CaptureStopped("stopped before playback started")
             for sub in subs:
                 st = sub.status()
+                if st and (sub.device, sub.sub) in self.ignore:
+                    if st.get("trigger_time") == self.ignore[(sub.device, sub.sub)]:
+                        continue  # still the stream that was ignored
+                    del self.ignore[(sub.device, sub.sub)]  # restarted: a new stream
                 if st and st["state"] in ACTIVE_STATES:
                     hw = sub.hw_params()
                     if hw:
@@ -617,6 +632,9 @@ class Capture:
         missed = None
         missed_known = False
         limit = int(self.duration * rate) if self.duration else None
+        tracker = self.tracker = self.song_end(params) if self.song_end else None
+        wav_frame = fmt.wav_bits // 8 * channels
+        song_end = None  # where the song ended: nothing after it is kept
         pending = b""
         fd = proc.stdout.fileno()
         try:
@@ -626,13 +644,27 @@ class Capture:
                     break
                 pending += chunk
                 usable = len(pending) - len(pending) % frame_bytes
-                if limit is not None:
-                    usable = max(0, min(usable, (limit - writer.frames) * frame_bytes))
+                ceiling = min([x for x in (limit, song_end) if x is not None], default=None)
+                if ceiling is not None:
+                    usable = max(0, min(usable, (ceiling - writer.frames) * frame_bytes))
                 if usable == 0:
+                    if ceiling is not None and writer.frames >= ceiling:
+                        pending = b""  # past the end: drop what arrives until arecord exits
                     continue
                 raw, pending = pending[:usable], pending[usable:]
                 payload = fmt.convert(raw) if fmt.convert else raw
                 before = writer.frames
+                if tracker is not None and song_end is None:
+                    try:
+                        end = tracker.feed(payload)
+                    except Exception as exc:  # never lose a recording over this: just stop following
+                        self.log("Can't follow the song any more (%s): stopping at silence instead" % exc)
+                        tracker = self.tracker = None
+                        end = None
+                    if end is not None and end < before + len(payload) // wav_frame:
+                        payload = payload[:max(0, end - before) * wav_frame]
+                        song_end = max(end, before)
+                        self._request_stop("reached the end of the song")
                 writer.write(payload)
                 self.frames = writer.frames
                 if not missed_known:
@@ -650,7 +682,9 @@ class Capture:
                         and self.frames - last_sound >= self.silence_stop * rate):
                     self._request_stop("%g s of digital silence after the music" % self.silence_stop)
                 if (self.stop_after_audio and first_sound is not None
+                        and (tracker is None or tracker.stop_frame() is None)
                         and self.frames - first_sound >= self.stop_after_audio * rate):
+                    # A safety net, timed from the first sound: the tracker couldn't place the song.
                     self._request_stop("reached the end of the song")
                 if (self.max_wait_audio and first_sound is None
                         and self.frames >= self.max_wait_audio * rate):
@@ -710,6 +744,7 @@ class Capture:
                 "player_states": self.state_log[:200],
                 "arecord": cmd,
                 "arecord_messages": stderr_lines[-50:],
+                "song_end": tracker.summary() if tracker is not None else None,
             },
             "cpu": cpu_usage(cpu0, cpu1),
         }

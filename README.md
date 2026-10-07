@@ -150,13 +150,17 @@ on a test. To compare, say, Roon against Lyrion, name the second player
   AIFF files.
 * Press **Record Roon**. SQ-tool waits for playback on the Loopback card. Then
   play the song in Roon, from the beginning. Recording starts when Roon starts
-  sending audio, and stops by itself:
-  * at the end of the song;
-  * when Roon closes the output;
-  * or after 5 seconds of digital silence (this can be changed in Settings). If
-    the song itself has a longer silent passage, SQ-tool waits longer.
-
-  You can also press **Stop now**.
+  sending audio.
+* Recording stops by itself **at the song's last sample**. SQ-tool recognises
+  the song in what Roon sends, so it stops there even when Roon goes straight
+  on to the next track in its queue.
+  * From a player that isn't bit-perfect, SQ-tool finds the song by
+    correlation instead, and the recording ends a quarter of a second after the
+    song.
+  * It also stops when Roon closes the output, or after 5 seconds of digital
+    silence. The silence time can be changed in Settings; if the song itself
+    has a longer silent passage, SQ-tool waits longer.
+  * You can also press **Stop now**.
 * Press **Record Mandarin** and do the same.
 * **Results** appear as soon as each recording is analysed: one card for each
   player against the file, and one for the two players against each other.
@@ -249,6 +253,8 @@ The players then play to the DAC as usual.
 * Play the same file in both players, from the beginning.
 * Record the same player twice. The two recordings should be identical, which
   shows the measurement itself is consistent.
+* Roon may still be playing its next track when you record Mandarin. SQ-tool
+  leaves that stream alone and records Mandarin.
 * Recording starts a moment after the player starts. Most songs begin with
   digital silence, so nothing is lost. If a song starts with sound right away,
   its first few milliseconds may be missing. The verdict then says so, and

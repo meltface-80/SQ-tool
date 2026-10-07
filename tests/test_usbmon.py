@@ -14,6 +14,7 @@ from helpers import FakeLoopback, alsa_bytes, music
 
 from sqtool.alsa import list_cards, parse_stream_playback, usb_audio_info, usb_dacs
 from sqtool.analysis import compare
+from sqtool.songend import SongEnd, envelope, pick_marks
 from sqtool.usbmon import (HEADER, XFER_BULK, XFER_CONTROL, XFER_ISO, UsbCapture, UsbEvent,
                            build_event)
 from sqtool.wavio import Audio, read_wav
@@ -125,6 +126,25 @@ class UsbCaptureTests(unittest.TestCase):
         ev = UsbEvent.parse(raw)
         self.assertEqual((ev.kind, ev.xfer, ev.ep, ev.dev, ev.bus, ev.ts), ("S", 0, 1, 5, 1, 12.5))
         self.assertEqual([bytes(p) for _, _, p in ev.iso_packets()], [b"ab" * 4, b"cd" * 4])
+
+    def test_stops_at_the_end_of_the_song(self):
+        # The player goes straight on to the next track: the take ends with the song's last sample.
+        song = Audio(music(seconds=3, lead=0.2, tail=0.2), 44100, 16)
+        following = music(seconds=2, lead=0.0, tail=0.0, seed=7)
+        marks, env = pick_marks(song), envelope(song)
+        self.fake.play("S32_LE", 44100, 2, card=2)
+        lead = np.zeros((4410, 2), np.int32)
+        events, t_end = usb_stream(np.concatenate([lead, song.data, following]), "S32_LE", 44100)
+        cap, takes = self.capture(
+            [set_interface(999.0, 1), set_rate(999.0, 44100)] + events + kill_urbs(t_end),
+            song_end=lambda hw: SongEnd(song, marks, env, hw["rate"], hw["channels"], 32, False))
+        self.assertEqual(len(takes), 1)
+        audio = read_wav(takes[0]["path"])
+        self.assertEqual(audio.frames, len(lead) + song.frames)
+        np.testing.assert_array_equal(audio.data[len(lead):], song.data)
+        with open(takes[0]["path"] + ".json") as f:
+            meta = json.load(f)["capture"]
+        self.assertEqual((meta["stop_reason"], meta["song_end"]["how"]), ("reached the end of the song", "exact"))
 
     def test_records_exactly_what_the_dac_receives(self):
         src = music(seconds=2, lead=0.2, tail=0.2)

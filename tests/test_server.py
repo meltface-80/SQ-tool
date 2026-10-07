@@ -103,7 +103,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(t["results"]["ab"]["verdict"], "DIFFERENT")
         self.assertIn("level changed: -0.500 dB, -0.500 dB (by channel)", t["results"]["b"]["lines"])
         st = call(self.base, "/api/state")[1]["recorder"]
-        self.assertEqual((st["state"], st["saved"], st["stop_reason"]), ("done", True, "the player closed the device"))
+        self.assertEqual((st["state"], st["saved"], st["stop_reason"]), ("done", True, "reached the end of the song"))
 
         listed = call(self.base, "/api/tests")[1]
         self.assertEqual(listed[0]["id"], tid)

@@ -3,9 +3,10 @@
 
 A music folder with two generated songs stands in for your library. Whenever a
 recording waits for a player, a simulated player "plays" the test's song to the
-loopback card: the fake /proc/asound shows the stream and a fake arecord
-delivers it. The first player (Roon) is bit-perfect; the second (Mandarin)
-applies -0.5 dB of digital volume with dither and sends packed 24-bit samples.
+loopback card, then goes on to a next track as real players do: the fake
+/proc/asound shows the stream and a fake arecord delivers it. The first player
+(Roon) is bit-perfect; the second (Mandarin) applies -0.5 dB of digital volume
+with dither and sends packed 24-bit samples. Each plays on its own substream.
 
     python3 tests/fake_server.py --port 3400 --data /tmp/sq-data --speed 4
 """
@@ -119,16 +120,21 @@ class FakePlayers:
 
     def play(self, tid: str, slot: str) -> None:
         src = read_wav(self.app.tests.audio_path(tid, "source"))
-        data = src.data if slot == "a" else volume_with_dither(src.data)
-        fmt = "S32_LE" if slot == "a" else "S24_3LE"
+        following = demo_song(src.rate, 16, seconds=4.0, seed=99)[:, :src.channels]  # the next track
+        if slot == "a":
+            data, fmt = np.concatenate([src.data, following]), "S32_LE"
+        else:
+            data, fmt = volume_with_dither(np.concatenate([src.data, following])), "S24_3LE"
         payload = np.concatenate([np.zeros((int(0.15 * src.rate), src.channels), np.int32), data])
         path = os.path.join(self.tmp, "play-%s.pcm" % slot)
         with open(path, "wb") as f:
             f.write(alsa_bytes(payload, fmt))
+        sub = 0 if slot == "a" else 1
         os.environ.update({"FAKE_PCM": path, "FAKE_FRAME_BYTES": str(FRAME_BYTES[fmt] * src.channels),
-                           "FAKE_SPEED": str(self.speed), "FAKE_SKIP_BYTES": "0"})
+                           "FAKE_SPEED": str(self.speed), "FAKE_SKIP_BYTES": "0",
+                           "FAKE_CLOSE_DIR": self.fake.subdir(0, "p", sub)})
         self.plays += 1
-        self.fake.play(fmt, src.rate, src.channels, pid=self.procs[slot].pid)
+        self.fake.play(fmt, src.rate, src.channels, sub=sub, pid=self.procs[slot].pid)
 
     def close(self) -> None:
         for p in self.procs.values():
