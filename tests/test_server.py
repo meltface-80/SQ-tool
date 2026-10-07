@@ -189,6 +189,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 400)
         status, s, _ = call(self.base, "/api/settings", "POST", {"players": {"a": "Roon"}, "idle_stop": 4})
         self.assertEqual((status, s["idle_stop"]), (200, 4.0))
+        import http.client
+        conn = http.client.HTTPConnection(self.base[len("http://"):], timeout=10)
+        conn.putrequest("POST", "/api/settings")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual((resp.status, json.loads(resp.read())["error"]), (400, "bad request length"))
+        conn.close()
         status, r, _ = call(self.base, "/api/loopback/load", "POST")
         self.assertEqual((status, r["message"]), (200, "the Loopback card is already there"))
 

@@ -14,7 +14,7 @@ import numpy as np
 from helpers import FAKE_ARECORD, FakeLoopback, alsa_bytes, music
 
 from sqtool.alsa import CaptureError
-from sqtool.sessions import Recorder, Tests, _steps, longest_silence, resolve_device
+from sqtool.sessions import Recorder, Tests, _steps, longest_silence, readable_formats, resolve_device
 from sqtool.spectrogram import LUT
 from sqtool.wavio import Audio, info_chunk, read_wav, write_wav
 
@@ -117,7 +117,8 @@ class MusicFolder(SessionBase):
         album = self.tests.browse("Artist/Album")
         self.assertEqual([f["name"] for f in album["files"]], ["01 Song.wav"])  # not cover.jpg
         self.assertEqual(self.tests.search("song artist"),
-                         [{"path": "Artist/Album/01 Song.wav", "name": "01 Song.wav", "folder": "Artist/Album"}])
+                         [{"path": "Artist/Album/01 Song.wav", "name": "01 Song.wav", "folder": "Artist/Album",
+                           "ok": True}])
         self.assertEqual(self.tests.search("nothing like this"), [])
         with self.assertRaises(ValueError):
             self.tests.browse("../..")
@@ -125,6 +126,23 @@ class MusicFolder(SessionBase):
             self.tests.browse("Nope")
         with self.assertRaises(ValueError):
             self.tests.create(music_rel="../data/settings.json")
+
+    def test_formats_that_cannot_be_read_here(self):
+        from unittest import mock
+        path = os.path.join(self.music_dir, "Artist", "Album", "02 Other.m4a")
+        with open(path, "wb") as f:
+            f.write(b"\0" * 64)
+        self.tests._index = None  # searched before this file existed
+        try:
+            files = {f["name"]: f["ok"] for f in self.tests.browse("Artist/Album")["files"]}
+            self.assertEqual(files, {"01 Song.wav": True, "02 Other.m4a": ".m4a" in readable_formats()})
+            with mock.patch("shutil.which", return_value=None):  # no ffmpeg, no flac
+                self.assertEqual(readable_formats(), {".wav", ".wave", ".aif", ".aiff", ".aifc"})
+                self.assertFalse(self.tests.search("other")[0]["ok"])
+                with self.assertRaises(ValueError):
+                    self.tests.create(music_rel="Artist/Album/02 Other.m4a")
+        finally:
+            os.unlink(path)
 
     def test_settings(self):
         s = self.tests.save_settings({"players": {"a": "Roon 2", "b": ""}, "idle_stop": "8"})
@@ -257,6 +275,72 @@ class Recording(SessionBase):
         self.assertEqual(t["results"]["a"]["verdict"], "IDENTICAL")
         self.tests.delete(tid)
 
+    def test_output_open_and_silent_long_before_the_song(self):
+        # Squeezelite keeps its output open, sending silence, until a song starts: here for 45 s,
+        # longer than the song plus every margin. The song is still recorded whole.
+        tid = self.new_test()
+        self.record(tid, "a", self.src, "S32_LE", lead_frames=45 * RATE)
+        t = self.results(tid, ["a"])
+        self.assertEqual(t["results"]["a"]["verdict"], "IDENTICAL")
+        self.tests.delete(tid)
+
+    def silent_player(self, seconds, close):
+        pcm = os.path.join(self.tmp, "silence.pcm")
+        with open(pcm, "wb") as f:
+            f.write(b"\0" * (seconds * RATE * 8))
+        os.environ.update({"FAKE_PCM": pcm, "FAKE_FRAME_BYTES": "8"})
+        if not close:
+            os.environ.pop("FAKE_CLOSE_DIR")
+
+    def test_only_silence_arrives(self):
+        tid = self.new_test()
+        self.silent_player(3, close=True)
+        self.rec.max_wait_audio = 1
+        try:
+            self.rec.start(tid, "a")
+            time.sleep(0.2)
+            self.fake.play("S32_LE", RATE, 2)
+            wait_for(lambda: not self.rec.active(), what="the recording")
+        finally:
+            self.rec.max_wait_audio = 600
+            self.fake.close()  # stopped early, the simulated player never closed its output
+        st = self.rec.status()
+        self.assertEqual((st["state"], st["saved"]), ("error", False))
+        self.assertIn("only digital silence arrived (no music arrived within 1 s)", st["error"])
+        self.assertEqual(self.tests.get(tid)["captures"], {})
+        self.tests.delete(tid)
+
+    def test_cancel_while_the_output_is_silent(self):
+        tid = self.new_test()
+        self.silent_player(60, close=False)
+        try:
+            self.rec.start(tid, "a")
+            time.sleep(0.2)
+            self.fake.play("S32_LE", RATE, 2)
+            st = wait_for(lambda: self.rec.status().get("take") and self.rec.status(), what="the open output")
+            self.assertEqual(st["state"], "recording")
+            self.assertIsNone(st["take"]["music_seconds"])  # listening, but no music yet
+            self.rec.stop()
+            wait_for(lambda: not self.rec.active(), what="the stop")
+        finally:
+            os.environ["FAKE_CLOSE_DIR"] = self.fake.subdir(0, "p", 0)
+            self.fake.close()
+        st = self.rec.status()
+        self.assertEqual((st["state"], st["saved"], st["error"]), ("done", False, None))
+        self.assertEqual(self.tests.get(tid)["captures"], {})
+        self.tests.delete(tid)
+
+    def test_record_waits_for_the_song(self):
+        tid = self.new_test()
+        self.tests._update(tid, lambda t: t["source"].update(state="preparing"))
+        with self.assertRaises(ValueError):
+            self.rec.start(tid, "a")
+        self.tests._update(tid, lambda t: t["source"].update(state="error"))
+        with self.assertRaises(ValueError):
+            self.rec.start(tid, "a")
+        self.assertFalse(self.rec.active())
+        self.tests.delete(tid)
+
     def test_stop_before_playback(self):
         tid = self.new_test()
         self.rec.start(tid, "a")
@@ -305,6 +389,20 @@ class Alignment(SessionBase):
         # On the source's timeline the dropout is skipped, so nothing else shows as different.
         self.assertTrue(is_black(self.tests.spectrogram(tid, "diff-a", 0, 0, 400, 100)[0]))
         self.assertFalse(read_wav(b"".join(self.tests.difference_wav(tid, "a")[0])).data.any())
+
+    def test_spectrogram_time_range(self):
+        tid = self.new_test()
+        # Zoomed in further than one sample per pixel: the picture still spans exactly what was asked.
+        png, info = self.tests.spectrogram(tid, "source", 2.0, 2.01, 2000, 100)
+        self.assertEqual(png_pixels(png).shape, (100, 2000, 3))
+        self.assertAlmostEqual(info["t0"], 2.0, places=4)
+        self.assertAlmostEqual(info["t1"], 2.01, places=4)
+        # Beyond the end of the song: kept within it.
+        png, info = self.tests.spectrogram(tid, "source", 0, 1e7, 200, 64)
+        self.assertAlmostEqual(info["t1"], 5.0, places=4)
+        png, info = self.tests.spectrogram(tid, "source", 1e6, 0, 200, 64)
+        self.assertLess(info["t0"], 5.0)
+        self.tests.delete(tid)
 
     def test_resampled_capture(self):
         tid = self.new_test()

@@ -154,10 +154,14 @@ def compute(fetch: Fetch, rate: int, start: int, end: int, width: int, height: i
 def render(fetch: Fetch, rate: int, start: int, end: int, width: int = 1200, height: int = 400,
            scale: str = "log", fmin: float = 20.0, db_low: float = -150.0, db_high: float = 0.0,
            fmax: Optional[float] = None):
-    """(PNG bytes, info) for the frames [start, end) of the source timeline."""
+    """(PNG bytes, info) for the frames [start, end) of the source timeline.
+
+    Zoomed in to fewer samples than pixel columns, neighbouring columns repeat the same
+    analysis, so the picture still spans exactly [start, end).
+    """
     width = int(min(max(width, 64), 4096))
     height = int(min(max(height, 64), 2048))
-    end = max(end, start + width)
+    end = max(end, start + 1)
     db, info = compute(fetch, rate, start, end, width, height, scale, fmin, fmax)
     level = np.nan_to_num((db - db_low) / (db_high - db_low), nan=0.0, neginf=0.0, posinf=1.0)
     rgb = LUT[np.clip((level * 255).round(), 0, 255).astype(np.uint8)]

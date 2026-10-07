@@ -233,9 +233,10 @@ class UsbCapture:
     def __init__(self, dac: UsbAudio, out_dir: str, name: str = "capture", idle_stop: float = 5.0,
                  max_seconds: Optional[float] = None, on_take: Optional[Callable[[str, dict], None]] = None,
                  log: Callable[[str], None] = print, source=None, gap: float = 0.25,
-                 stop_after_audio: Optional[float] = None):
+                 stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None):
         self.dac = dac
         self.stop_after_audio = stop_after_audio  # seconds after the music starts (the song's length)
+        self.max_wait_audio = max_wait_audio  # give up when no music arrives within this many seconds
         self.out_dir = out_dir
         self.name = name
         self.idle_stop = idle_stop
@@ -304,6 +305,8 @@ class UsbCapture:
                 "format": take.params.get("format"), "rate": take.params.get("rate"),
                 "channels": take.params.get("channels"), "player": take.player,
                 "seconds": round(take.frames / take.params["rate"], 2),
+                "music_seconds": None if take.first_audio_frame is None else
+                round((take.frames - take.first_audio_frame) / take.params["rate"], 2),
                 "interruptions": len(take.interruptions), "packets": take.packets,
             }
         return out
@@ -354,6 +357,9 @@ class UsbCapture:
         if self.idle_stop and self._last_sound is not None:
             if time.monotonic() - self._last_sound >= self.idle_stop:
                 self.stop("playback ended (%g s without music)" % self.idle_stop)
+        if (self.max_wait_audio and self._last_sound is None
+                and time.monotonic() - self.started >= self.max_wait_audio):
+            self.stop("no music arrived within %g s" % self.max_wait_audio)
         take = self.take
         if self.max_seconds and take and take.frames >= self.max_seconds * take.params["rate"]:
             self.stop("reached the maximum length")

@@ -161,8 +161,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
-        if length > 1 << 20:
-            raise ValueError("request too large")
+        if length < 0 or length > 1 << 20:
+            raise ValueError("bad request length")
         data = self.rfile.read(length) if length else b""
         try:
             body = json.loads(data.decode() or "{}")

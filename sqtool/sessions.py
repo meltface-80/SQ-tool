@@ -39,7 +39,8 @@ from .usbmon import UsbCapture, usbmon_state
 from .wavio import (SIDECAR_SUFFIX, Audio, AudioFileError, float_wav_header, load_audio, read_tags,
                     read_wav, write_wav)
 
-AUDIO_EXTENSIONS = {".flac", ".wav", ".wave", ".aif", ".aiff", ".aifc", ".m4a", ".alac", ".wv", ".ape"}
+NATIVE_EXTENSIONS = {".wav", ".wave", ".aif", ".aiff", ".aifc"}  # read by SQ-tool itself
+AUDIO_EXTENSIONS = NATIVE_EXTENSIONS | {".flac", ".m4a", ".alac", ".wv", ".ape"}
 SLOTS = ("a", "b")
 ITEMS = ("source",) + SLOTS
 # result key -> (reference, compared)
@@ -51,6 +52,14 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$")
 DEVICE_RE = re.compile(r"^(auto|loopback(:\w+)?|usb(:\w+)?)$")
 INDEX_TTL = 300.0  # seconds before the music folder is scanned again for search
 AUDIO_CACHE_IDLE = 600.0  # decoded recordings unused this long are dropped from memory
+
+
+def readable_formats() -> set:
+    """Extensions of the music files SQ-tool can decode here (FLAC needs flac or ffmpeg)."""
+    ffmpeg = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+    if ffmpeg:
+        return set(AUDIO_EXTENSIONS)
+    return NATIVE_EXTENSIONS | ({".flac"} if shutil.which("flac") else set())
 
 
 def clean(obj):
@@ -215,14 +224,16 @@ class Tests:
         if not os.path.isdir(path):
             raise KeyError(rel)
         dirs, files = [], []
+        ok = readable_formats()
         for entry in sorted(os.scandir(path), key=lambda e: e.name.lower()):
             if entry.name.startswith("."):
                 continue
             try:
+                ext = os.path.splitext(entry.name)[1].lower()
                 if entry.is_dir():
                     dirs.append(entry.name)
-                elif os.path.splitext(entry.name)[1].lower() in AUDIO_EXTENSIONS:
-                    files.append({"name": entry.name, "size": entry.stat().st_size})
+                elif ext in AUDIO_EXTENSIONS:
+                    files.append({"name": entry.name, "size": entry.stat().st_size, "ok": ext in ok})
             except OSError:
                 continue
         rel = os.path.relpath(path, os.path.realpath(self.music_dir))
@@ -251,12 +262,12 @@ class Tests:
         words = [w for w in query.lower().split() if w]
         if not words or not self.music_available():
             return []
-        found = []
+        found, ok = [], readable_formats()
         for rel in self._music_index(budget):
             low = rel.lower()
             if all(w in low for w in words):
-                found.append({"path": rel, "name": os.path.basename(rel),
-                              "folder": os.path.dirname(rel)})
+                found.append({"path": rel, "name": os.path.basename(rel), "folder": os.path.dirname(rel),
+                              "ok": os.path.splitext(low)[1] in ok})
                 if len(found) >= limit:
                     break
         return found
@@ -294,6 +305,10 @@ class Tests:
             if not os.path.isfile(src):
                 raise KeyError(music_rel)
             filename = os.path.basename(src)
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in AUDIO_EXTENSIONS and ext not in readable_formats():
+                raise ValueError("SQ-tool can't read %s files here: choose the FLAC, WAV or AIFF version "
+                                 "of the song" % ext)
         elif upload is not None:
             src = upload
         else:
@@ -352,8 +367,10 @@ class Tests:
     def delete(self, tid: str) -> None:
         d = self._dir(tid)
         with self._lock:
-            shutil.rmtree(d)
+            trash = os.path.join(self.tmp, "deleted-%s-%s" % (tid, uuid.uuid4().hex[:6]))
+            os.rename(d, trash)  # gone at once; anything still writing into it fails harmlessly
         self._forget(d)
+        shutil.rmtree(trash, ignore_errors=True)
 
     def audio_path(self, tid: str, which: str) -> str:
         if which not in ITEMS:
@@ -425,7 +442,10 @@ class Tests:
                 else:
                     self._do_capture(*job[1:])
             except KeyError:
-                pass  # the test was deleted meanwhile
+                if job[0] == "capture":  # the test was deleted meanwhile: drop its recording
+                    rec_dir = os.path.dirname(os.path.abspath(job[3]))
+                    if os.path.dirname(rec_dir) == self.tmp:
+                        shutil.rmtree(rec_dir, ignore_errors=True)
             except Exception as exc:
                 if isinstance(exc, AudioFileError):
                     self.log("Test %s: %s" % (job[1], exc))
@@ -643,9 +663,10 @@ class Tests:
             used = [which]
             matched = False
         src = audio["source"]
-        t0 = max(0.0, float(t0))
+        least = 64.0 / item.rate
+        t0 = min(max(0.0, float(t0)), max(0.0, src.duration - least))
         t1 = float(t1) if t1 and t1 > t0 else src.duration
-        t1 = max(t1, t0 + 64.0 / item.rate)
+        t1 = max(min(t1, src.duration), t0 + least)
         sig = json.dumps([which, round(t0, 6), round(t1, 6), width, height, scale, db_low, matched, fmax,
                           [place[u] for u in used], [os.path.getmtime(a.path) for a in audio.values() if a.path]],
                          default=list)
@@ -658,7 +679,7 @@ class Tests:
         start, end = int(round(t0 * item.rate)), int(round(t1 * item.rate))
         with self._render_slots:
             png, info = render(fetch, item.rate, start, end, width, height, scale, 20.0, db_low, 0.0, fmax)
-        info.update({"which": which, "t0": start / item.rate, "t1": max(end, start + width) / item.rate,
+        info.update({"which": which, "t0": start / item.rate, "t1": end / item.rate,
                      "rate": item.rate, "scale": scale, "db_low": db_low, "db_high": 0.0, "matched": matched,
                      "width": width, "height": height})
         tmp = cache + ".%s.tmp" % uuid.uuid4().hex[:6]
@@ -784,26 +805,39 @@ class Recorder:
         self.arecord = arecord or os.environ.get("SQTOOL_ARECORD", "arecord")
         self.capture = None
         self.info: dict = {}
+        self.max_wait_audio = 600.0  # stop waiting for the music after 10 minutes
         self._out_dir: Optional[str] = None
+        self._runner: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
+    def _filing(self) -> bool:
+        """The recording has ended but is still being filed (or its error noted)."""
+        return self._runner is not None and self._runner.is_alive()
+
     def active(self) -> bool:
-        return self.capture is not None and self.capture.state not in ("done", "error")
+        if self.capture is None:
+            return False
+        return self._filing() or self.capture.state not in ("done", "error")
 
     def start(self, tid: str, slot: str) -> dict:
         if slot not in SLOTS:
             raise ValueError("unknown player %r" % slot)
         test = self.tests.get(tid)
+        src = test["source"]
+        if src.get("state") != "ready":
+            # Its length sets when the recording stops: wait for it.
+            raise ValueError("the song is still being analysed: try again in a moment"
+                             if src.get("state") == "preparing" else
+                             "the song could not be read, so there is nothing to compare with")
         with self._lock:
             if self.active():
                 raise CaptureError("a recording is already running: stop it first")
             self._discard_unsaved()
             settings = self.tests.settings()
             device = resolve_device(settings.get("device") or "auto")
-            src = test["source"]
             # Stop at the end of the song: its length after the music starts, with a margin for
             # silence the player adds; and after a silence longer than any inside the song.
-            expected = src.get("duration") if src.get("state") == "ready" else None
+            expected = src.get("duration")
             limit = expected + 5.0 if expected else None
             idle = float(settings.get("idle_stop", 5) or 0)
             if idle and src.get("longest_silence"):
@@ -812,14 +846,19 @@ class Recorder:
             os.makedirs(out_dir)
             self._out_dir = out_dir
             kind, _, ref = device.partition(":")
+            # With the song's length known, its end is timed from the first sound: a player
+            # may send silence for a long time first (Squeezelite keeps its output open).
+            cap_seconds = None if limit else 1800.0
             if kind == "usb":
                 cap = UsbCapture(find_usb_dac(ref or None), out_dir, name=slot, idle_stop=idle,
-                                 max_seconds=(limit or 1200) + 30, log=self.log, stop_after_audio=limit)
+                                 max_seconds=cap_seconds, log=self.log, stop_after_audio=limit,
+                                 max_wait_audio=self.max_wait_audio)
                 cap.on_take = lambda path, meta, cap=cap: self._take(tid, slot, path, cap)
             elif kind == "loopback":
                 cap = Capture(os.path.join(out_dir, "%s.wav" % slot), card=ref or None, silence_stop=idle,
                               arecord=self.arecord, log=self.log, handle_sigint=False,
-                              stop_after_audio=limit, duration=(limit or 1200) + 30)
+                              stop_after_audio=limit, duration=cap_seconds, wait=self.max_wait_audio,
+                              max_wait_audio=self.max_wait_audio)
             else:
                 raise CaptureError("unknown recording device %r" % device)
             self.capture = cap
@@ -827,9 +866,11 @@ class Recorder:
                          "expected_seconds": expected, "saved": False, "error": None}
             if kind == "usb":
                 cap.start()
+                self._runner = cap._thread
             else:
-                threading.Thread(target=self._run_loopback, args=(cap, tid, slot), name="loopback-capture",
-                                 daemon=True).start()
+                self._runner = threading.Thread(target=self._run_loopback, args=(cap, tid, slot),
+                                                name="loopback-capture", daemon=True)
+                self._runner.start()
         return self.status()
 
     def _take(self, tid: str, slot: str, path: str, cap) -> None:
@@ -863,7 +904,7 @@ class Recorder:
 
     def _discard_unsaved(self) -> None:
         """Remove what the previous recording left behind if it saved nothing (stopped early, say)."""
-        if self._out_dir and not self.info.get("saved") and not self.active():
+        if self._out_dir and not self.info.get("saved"):
             shutil.rmtree(self._out_dir, ignore_errors=True)
         self._out_dir = None
 
@@ -878,6 +919,8 @@ class Recorder:
         if cap is None:
             return None
         st = cap.status()
+        if st["state"] in ("done", "error") and self._filing():
+            st["state"] = "stopping"
         st.update(self.info)
         if st.get("error") is None and cap.state == "error":
             st["error"] = getattr(cap, "error", None) or cap.message
