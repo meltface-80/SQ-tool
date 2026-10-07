@@ -449,11 +449,11 @@ class Capture:
                  log: Callable[[str], None] = print, handle_sigint: bool = True,
                  stop_after_audio: Optional[float] = None, max_wait_audio: Optional[float] = None,
                  song_end: Optional[Callable[[dict], object]] = None,
-                 ignore: Optional[List[Tuple[int, int, Optional[str]]]] = None):
+                 ignore: Optional[List[Tuple[int, int, Optional[int]]]] = None):
         self.out_path = out_path
-        # Streams to pass over while they go on as they were: (device, subdevice, trigger time).
-        # Another player left playing (the next track in its queue) shouldn't be recorded instead.
-        self.ignore = {(d, s): t for d, s, t in (ignore or [])}
+        # Streams to pass over while they stay open: (device, subdevice, owner pid). Another player
+        # left playing (the next track in its queue), paused or not, shouldn't be recorded instead.
+        self.ignore = {(d, s): pid for d, s, pid in (ignore or [])}
         # Makes a songend.SongEnd for the stream's format: it finds where the song ends, and the
         # recording stops (and is cut) exactly there, even if the player goes on to another track.
         self.song_end = song_end
@@ -501,7 +501,8 @@ class Capture:
                            "seconds": round(self.frames / rate, 2),
                            # how long the music has been playing (None: only silence so far)
                            "music_seconds": None if first is None else round((self.frames - first) / rate, 2)}
-            at = self.tracker.song_seconds(self.frames) if self.tracker is not None else None
+            tracker = self.tracker
+            at = tracker.song_seconds(self.frames) if tracker is not None else None
             out["take"]["song_seconds"] = None if at is None else round(at, 2)  # where in the song
         return out
 
@@ -533,10 +534,12 @@ class Capture:
                 raise CaptureStopped("stopped before playback started")
             for sub in subs:
                 st = sub.status()
-                if st and (sub.device, sub.sub) in self.ignore:
-                    if st.get("trigger_time") == self.ignore[(sub.device, sub.sub)]:
+                key = (sub.device, sub.sub)
+                if key in self.ignore:
+                    # (Pausing, resuming or an underrun restarts its clock: not a new stream.)
+                    if st and st.get("owner_pid") == self.ignore[key]:
                         continue  # still the stream that was ignored
-                    del self.ignore[(sub.device, sub.sub)]  # restarted: a new stream
+                    del self.ignore[key]  # closed since, or someone else's: what comes next counts
                 if st and st["state"] in ACTIVE_STATES:
                     hw = sub.hw_params()
                     if hw:
@@ -548,6 +551,12 @@ class Capture:
     # -- the capture itself ---------------------------------------------------
 
     def run(self) -> dict:
+        try:
+            return self._run()
+        finally:
+            self.song_end = self.tracker = None  # done with the song (it can be large)
+
+    def _run(self) -> dict:
         card = self._card()
         if not shutil.which(self.arecord):
             raise CaptureError("arecord not found. Install alsa-utils "
@@ -662,8 +671,11 @@ class Capture:
                         tracker = self.tracker = None
                         end = None
                     if end is not None and end < before + len(payload) // wav_frame:
+                        if end < before:  # known only once the stream had gone past it: cut back
+                            writer.truncate(end)
+                            before = writer.frames
                         payload = payload[:max(0, end - before) * wav_frame]
-                        song_end = max(end, before)
+                        song_end = end
                         self._request_stop("reached the end of the song")
                 writer.write(payload)
                 self.frames = writer.frames
@@ -682,7 +694,7 @@ class Capture:
                         and self.frames - last_sound >= self.silence_stop * rate):
                     self._request_stop("%g s of digital silence after the music" % self.silence_stop)
                 if (self.stop_after_audio and first_sound is not None
-                        and (tracker is None or tracker.stop_frame() is None)
+                        and (tracker is None or tracker.end_frame() is None)
                         and self.frames - first_sound >= self.stop_after_audio * rate):
                     # A safety net, timed from the first sound: the tracker couldn't place the song.
                     self._request_stop("reached the end of the song")
@@ -691,6 +703,12 @@ class Capture:
                     self._request_stop("no music arrived within %s" % _span(self.max_wait_audio))
         finally:
             self._request_stop("arecord exited")
+            if tracker is not None and song_end is None:
+                # Stopped some other way past the song's end (waiting out a dropout, say): cut there.
+                end = tracker.end_frame()
+                if end is not None and first_sound is not None and first_sound < end < writer.frames:
+                    writer.truncate(end)
+                    self.frames = writer.frames
             proc.wait()
             t_err.join(timeout=2)
             t_mon.join(timeout=2)

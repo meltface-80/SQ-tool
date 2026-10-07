@@ -163,8 +163,9 @@ class MusicFolder(SessionBase):
 
 
 class Recording(SessionBase):
-    def record(self, tid, slot, data, fmt, lead_frames=0, sub=0, pid=None):
-        """Record `slot` while a simulated player plays `data` to the loopback card in format `fmt`."""
+    def record(self, tid, slot, data, fmt, lead_frames=0, sub=0, pid=None, meanwhile=None):
+        """Record `slot` while a simulated player plays `data` to the loopback card in format `fmt`
+        (`meanwhile` runs while the recording waits for it, which it must go on doing)."""
         pcm = os.path.join(self.tmp, "%s.pcm" % slot)
         payload = np.concatenate([np.zeros((lead_frames, data.shape[1]), np.int32), data])
         with open(pcm, "wb") as f:
@@ -176,6 +177,10 @@ class Recording(SessionBase):
         self.assertAlmostEqual(st["expected_seconds"], 5.0, places=3)
         time.sleep(0.2)
         self.assertEqual(self.rec.status()["state"], "waiting")
+        if meanwhile:
+            meanwhile()
+            time.sleep(0.3)
+            self.assertEqual(self.rec.status()["state"], "waiting")
         self.fake.play(fmt, RATE, 2, sub=sub, pid=pid)
         wait_for(lambda: not self.rec.active(), what="the recording")
         st = self.rec.status()
@@ -301,18 +306,19 @@ class Recording(SessionBase):
         self.assertEqual(t["analysis"]["a"]["capture"]["song_end"]["how"], "exact")
         self.assertEqual(res["verdict"], "IDENTICAL")
 
-        # Roon goes on playing its next track (the simulated one never closes its output).
-        # Mandarin plays on the next free substream: that is what gets recorded, not Roon.
-        # It isn't bit-perfect (-0.5 dB with dither): found by correlation, stopped just after the song.
+        # Roon goes on playing its next track (the simulated one never closes its output), and
+        # is paused. Mandarin plays on the next free substream: that is what gets recorded.
+        # It isn't bit-perfect (-0.5 dB with dither): found on the waveform, and stopped at the song's end.
         self.assertEqual(self.fake.subdir(0, "p", 0)[-4:], "sub0")
+        pause_roon = lambda: self.fake.play("S32_LE", RATE, 2, state="PAUSED", sub=0, pid=roon.pid)  # noqa: E731
         self.record(tid, "b", np.concatenate([volume_with_dither(self.src), volume_with_dither(following, seed=3)]),
-                    "S24_3LE", lead_frames=lead, sub=1, pid=mandarin.pid)
+                    "S24_3LE", lead_frames=lead, sub=1, pid=mandarin.pid, meanwhile=pause_roon)
         self.assertEqual(self.rec.status()["ignoring"], "Roon")
         t = self.results(tid, ["b"])
         self.assertEqual(t["captures"]["b"]["player"], "mandarin")
         frames = read_wav(self.tests.audio_path(tid, "b")).frames
         self.assertEqual(t["captures"]["b"]["stop_reason"], "reached the end of the song")
-        self.assertEqual(frames, lead + len(self.src) + int(0.25 * RATE))  # the song and a 0.25 s margin
+        self.assertEqual(frames, lead + len(self.src))
         self.assertEqual(t["analysis"]["b"]["capture"]["song_end"]["how"], "aligned")
         self.assertEqual(t["results"]["b"]["verdict"], "DIFFERENT")
         self.fake.close(sub=0)

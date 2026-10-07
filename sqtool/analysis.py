@@ -635,7 +635,8 @@ def _fine_lag(ref: Audio, cap: Audio, rs: int, length: int, lag0: int, search: i
             if r_e[i] == 0:
                 continue
             corr = np.fft.irfft(cf[:, j] * np.conj(rf[:, i]), nfft)[:n_out]
-            best = np.maximum(best, np.abs(corr) / np.sqrt(np.maximum(win_e[:, j] * r_e[i], 1e-300)))
+            # (A window with next to no energy scores next to nothing, not FFT rounding noise over zero.)
+            best = np.maximum(best, np.abs(corr) / np.sqrt(np.maximum(win_e[:, j], 1e-9 * r_e[i]) * r_e[i]))
         score += best
     score /= c.shape[1]
     k = int(np.argmax(score))
