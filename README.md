@@ -176,14 +176,14 @@ on a test. To compare, say, Roon against Lyrion, name the second player
 ### The spectrograms
 
 There is one picture per recording, all lined up on the song's timeline and on
-one colour scale, from black (the lowest level, −150 dB by default) to pale
-yellow (0 dB, full scale).
+one colour scale, from dark graphite (the lowest level, −150 dB by default)
+through bronze and brass to pale gold (0 dB, full scale).
 
 * **What each one sent** shows the file, Roon and Mandarin. If they are
   identical, the pictures are identical.
 * **Differences** shows what is left when one recording is subtracted from the
   other, sample by sample: Roon − file, Mandarin − file and Mandarin − Roon.
-  **Black means the samples are identical.**
+  **Dark graphite means the samples are identical.**
   * **Match levels first** removes a plain volume difference before
     subtracting. It shows what else changed, such as dither or EQ.
 * **Red lines** mark dropouts: gaps or jumps in a player's stream. The pictures

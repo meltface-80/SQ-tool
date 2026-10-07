@@ -2,12 +2,16 @@
 (function () {
   "use strict";
 
-  var COLORS = { source: "#0ea5e9", a: "#8b5cf6", b: "#f97316" };
-  var DIFF = "#ef4444";
+  // Plain, muted colours that stay apart for every reader, colour-blind ones too.
+  var COLORS = { source: "#3987e5", a: "#199e70", b: "#d95926" };
+  var DIFF = "#e8836b";
+  var MUSIC = "#c9c6bd";  // the music beside what remains, on the difference charts
   var ACTIVE = ["starting", "waiting", "recording", "stopping"];
-  // The spectrogram colour map (matches sqtool/spectrogram.py).
-  var INFERNO = [[0, 0, 4], [22, 11, 57], [66, 10, 104], [106, 23, 110], [147, 38, 103], [188, 55, 84],
-    [221, 81, 58], [243, 120, 25], [252, 165, 10], [246, 215, 70], [252, 255, 164]];
+  // The spectrogram colour map: graphite, bronze, brass, pale gold (matches sqtool/spectrogram.py,
+  // and its name keeps pictures in the old colours out of the browser's cache).
+  var MAP = "brass";
+  var MAP_STEPS = [[18, 20, 22], [44, 34, 29], [69, 49, 39], [95, 64, 47], [122, 81, 52], [148, 100, 56],
+    [170, 122, 63], [190, 146, 76], [208, 171, 97], [223, 196, 132], [237, 221, 173]];
   var S = {
     page: null, tid: null, state: null, test: null, rev: null, html: {}, charts: [], timer: null,
     browsePath: load("sq.browse", ""), searchSeq: 0,
@@ -90,7 +94,7 @@
     return n.toFixed(i ? 1 : 0) + " " + u[i];
   }
   function fmtHz(f) { return f >= 1000 ? (f / 1000 >= 10 ? (f / 1000).toFixed(1) : (f / 1000).toFixed(2)) + " kHz" : f.toFixed(0) + " Hz"; }
-  function fpColor(fp) { return fp ? "hsl(" + (parseInt(fp.slice(0, 6), 16) % 360) + " 70% 48%)" : "transparent"; }
+  function fpColor(fp) { return fp ? "hsl(" + (parseInt(fp.slice(0, 6), 16) % 360) + " 32% 56%)" : "transparent"; }
   function swatch(color) { return '<span class="swatch" style="background:' + color + '"></span>'; }
   function players() { var s = S.state && S.state.settings; return (s && s.players) || { a: "Roon", b: "Mandarin" }; }
   function recActive(rec) { return rec && ACTIVE.indexOf(rec.state) >= 0; }
@@ -633,7 +637,7 @@
         sp.floor[sp.mode] = Number(e.target.value); save("sq.floor", sp.floor); loadSpec();
       });
       $("#spec-matched").addEventListener("change", function (e) { sp.matched = e.target.checked; loadSpec(); });
-      $("#cb-grad").style.background = "linear-gradient(to right," + INFERNO.map(function (c, i) {
+      $("#cb-grad").style.background = "linear-gradient(to right," + MAP_STEPS.map(function (c, i) {
         return "rgb(" + c.join(",") + ") " + (10 * i) + "%";
       }).join(",") + ")";
       bindSpecPointer($("#spec-stack"));
@@ -661,7 +665,8 @@
   function specParams(width, height) {
     var sp = S.spec;
     return "t0=" + sp.t0.toFixed(6) + "&t1=" + sp.t1.toFixed(6) + "&w=" + width + "&h=" + height + "&scale=" + sp.scale +
-      "&floor=" + sp.floor[sp.mode] + (sp.mode === "diffs" && sp.matched ? "&matched=1" : "") + "&v=" + sp.data.split("|")[0];
+      "&floor=" + sp.floor[sp.mode] + (sp.mode === "diffs" && sp.matched ? "&matched=1" : "") + "&v=" + sp.data.split("|")[0] +
+      "&map=" + MAP;
   }
 
   function loadSpec() {
@@ -678,7 +683,7 @@
       : fmtAt(sp.t0, decimals(span)) + " – " + fmtAt(sp.t1, decimals(span)) + " (" + fmtSecs(span) + ")";
     $("#spec-note").innerHTML = sp.mode === "signals"
       ? "Each picture shows one recording over the same stretch of the song, on one colour scale. Drag across a picture to zoom in; tap to read the time and frequency."
-      : "What is left when one recording is subtracted from the other, sample by sample. <b>Black means the samples are identical.</b>" +
+      : "What is left when one recording is subtracted from the other, sample by sample. <b>Dark graphite means the samples are identical.</b>" +
         (sp.matched ? " With “Match levels first”, a plain volume difference is removed before subtracting." : "");
     $("#spec-note").innerHTML += " Red lines mark dropouts (gaps or jumps in a stream): the pictures skip over them to keep everything lined up with the song.";
     var dpr = Math.min(window.devicePixelRatio || 1, 2.5);
@@ -905,7 +910,7 @@
     spectrumChart($("#ch-spec"), spec); legend($("#lg-ch-spec"), spec);
     timeChart($("#ch-env"), env, "dBFS", t.source.duration); legend($("#lg-ch-env"), env);
     pairs.forEach(function (k) {
-      var pl = t.results[k].plots, music = { label: "music", color: COLORS[k === "ab" ? "b" : k] };
+      var pl = t.results[k].plots, music = { label: "music", color: MUSIC };
       if (pl.spectrum) {
         var s1 = [Object.assign({ x: pl.spectrum.freqs, y: pl.spectrum.signal_db }, music), { label: "what remains", color: DIFF, x: pl.spectrum.freqs, y: pl.spectrum.residual_db }];
         spectrumChart($("#ch-dspec-" + k), s1, 230); legend($("#lg-ch-dspec-" + k), s1);

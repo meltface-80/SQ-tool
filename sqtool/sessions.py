@@ -36,7 +36,7 @@ from .analysis import _chunks, analyze_file, compare, silence_bounds, to_float
 from .plots import exact_timeline, item_plots, null_plots
 from .report import comparison_lines, headline, short_verdict
 from .songend import SongEnd, envelope, song_index
-from .spectrogram import difference, fetch_from, render
+from .spectrogram import COLOUR_MAP, difference, fetch_from, render
 from .usbmon import UsbCapture, usbmon_state
 from .wavio import (ALSA_FORMATS, SIDECAR_SUFFIX, Audio, AudioFileError, float_wav_header, load_audio,
                     read_tags, read_wav, write_wav)
@@ -684,7 +684,7 @@ class Tests:
         t0 = min(max(0.0, float(t0)), max(0.0, src.duration - least))
         t1 = float(t1) if t1 and t1 > t0 else src.duration
         t1 = max(min(t1, src.duration), t0 + least)
-        sig = json.dumps([which, round(t0, 6), round(t1, 6), width, height, scale, db_low, matched, fmax,
+        sig = json.dumps([COLOUR_MAP, which, round(t0, 6), round(t1, 6), width, height, scale, db_low, matched, fmax,
                           [place[u] for u in used], [os.path.getmtime(a.path) for a in audio.values() if a.path]],
                          default=list)
         key = hashlib.sha1(sig.encode()).hexdigest()[:20]
